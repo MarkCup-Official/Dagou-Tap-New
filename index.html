@@ -3,50 +3,54 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
-<meta name="theme-color" content="#241407" />
+<meta name="theme-color" content="#fff2dc" />
 <title>大狗Tap</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐶</text></svg>" />
 <style>
+  /* 全页面限定调色板：米白底 + 主色黄 + 次色灰（极少点缀色） */
   :root {
-    --brown-deep: #241407;
-    --brown: #4a2c14;
-    --tan: #8b5a2b;
-    --gold: #f5c96b;
-    --gold-soft: #ffd98a;
-    --cream: #fff3d6;
+    --cream: #fff2dc;   /* 背景 · 米白 */
+    --amber: #ffb400;   /* 主色 · 黄 */
+    --gray:  #87837e;   /* 次要 · 灰 */
+    --coral: #ff5a5f;   /* 点缀（少量） */
+    --teal:  #16c2a3;   /* 点缀（少量） */
+    --blue:  #3e7bfa;   /* 点缀（少量） */
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; overflow: hidden; }
   body {
     font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-    background: var(--brown-deep);
-    color: var(--cream);
+    background: var(--cream);
+    color: var(--gray);
     -webkit-tap-highlight-color: transparent;
     user-select: none;
     -webkit-user-select: none;
     touch-action: none;
   }
 
+  /* 纯色背景（固定米白，canvas 未启动时的兜底色） */
   #stage {
     position: fixed;
     inset: 0;
     overflow: hidden;
-    background: radial-gradient(130% 130% at 50% 15%, #7a4d20 0%, #4a2c14 48%, #221206 100%);
+    background: var(--cream);
   }
 
-  /* 节拍呼吸光晕（JS 按节拍驱动透明度） */
-  #glow {
+  /* 全屏特效画布（仿 Mikutap：特效铺满全屏、层层叠加） */
+  #fx {
     position: absolute;
     inset: 0;
     pointer-events: none;
-    background: radial-gradient(60% 60% at 50% 45%, rgba(245, 201, 107, .55), rgba(245, 201, 107, 0) 70%);
-    opacity: 0;
-    mix-blend-mode: screen;
   }
 
-  /* 分区网格 */
-  #grid { position: absolute; inset: 0; display: grid; pointer-events: none; }
-  #grid .cell { border: 1px solid rgba(255, 217, 138, .07); }
+  /* 节拍呼吸闪光（主色黄，JS 按节拍驱动） */
+  #beatflash {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: var(--amber);
+    opacity: 0;
+  }
 
   /* 大狗 */
   #dog {
@@ -66,7 +70,7 @@
   #dog-inner img {
     width: 100%;
     display: block;
-    filter: drop-shadow(0 18px 40px rgba(0, 0, 0, .45)) drop-shadow(0 0 60px rgba(245, 201, 107, .25));
+    filter: drop-shadow(0 18px 40px rgba(135, 131, 126, .4));
   }
   #dog-close { transition: opacity .1s linear; }
   #dog-open {
@@ -79,60 +83,6 @@
   #dog-inner.bark #dog-open { opacity: 1; }
   #dog-inner.bark #dog-close { opacity: 0; }
 
-  header {
-    position: absolute;
-    top: max(18px, env(safe-area-inset-top));
-    width: 100%;
-    text-align: center;
-    pointer-events: none;
-    z-index: 5;
-  }
-  header h1 {
-    font-size: clamp(20px, 3.4vmin, 30px);
-    letter-spacing: .35em;
-    font-weight: 800;
-    color: var(--gold-soft);
-    text-shadow: 0 2px 12px rgba(0, 0, 0, .4);
-  }
-  header h1 em { font-style: normal; color: var(--cream); }
-
-  #hint {
-    position: absolute;
-    bottom: max(16px, env(safe-area-inset-bottom));
-    width: 100%;
-    text-align: center;
-    font-size: clamp(11px, 1.8vmin, 14px);
-    letter-spacing: .25em;
-    color: rgba(255, 243, 214, .5);
-    pointer-events: none;
-    z-index: 5;
-  }
-
-  /* 点击特效层 */
-  #fx { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
-  .ripple {
-    position: absolute;
-    border-radius: 50%;
-    border: 3px solid var(--gold);
-    box-shadow: 0 0 24px rgba(245, 201, 107, .6), inset 0 0 24px rgba(245, 201, 107, .35);
-  }
-  .dot {
-    position: absolute;
-    width: 1.6vmin;
-    height: 1.6vmin;
-    border-radius: 50%;
-    background: var(--gold-soft);
-    box-shadow: 0 0 10px rgba(245, 201, 107, .8);
-  }
-  .float-text {
-    position: absolute;
-    font-weight: 900;
-    color: var(--gold-soft);
-    text-shadow: 0 2px 10px rgba(0, 0, 0, .45), 0 0 18px rgba(245, 201, 107, .5);
-    font-size: clamp(22px, 4.5vmin, 40px);
-    white-space: nowrap;
-  }
-
   /* 开始遮罩（首次点击解锁音频） */
   #overlay {
     position: absolute;
@@ -143,9 +93,7 @@
     gap: 2.2vmin;
     align-items: center;
     justify-content: center;
-    background: rgba(26, 15, 6, .55);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
+    background: rgba(255, 242, 220, .9);
     transition: opacity .5s ease;
     cursor: pointer;
   }
@@ -154,14 +102,13 @@
     font-size: clamp(34px, 8vmin, 72px);
     font-weight: 900;
     letter-spacing: .18em;
-    color: var(--gold-soft);
-    text-shadow: 0 4px 24px rgba(0, 0, 0, .5);
+    color: var(--amber);
   }
-  #overlay .title em { font-style: normal; color: var(--cream); }
+  #overlay .title em { font-style: normal; color: var(--gray); }
   #overlay .sub {
     font-size: clamp(13px, 2.4vmin, 18px);
     letter-spacing: .5em;
-    color: rgba(255, 243, 214, .85);
+    color: var(--gray);
     animation: pulse 1.6s ease-in-out infinite;
   }
   @keyframes pulse { 50% { opacity: .35; } }
@@ -169,8 +116,8 @@
 </head>
 <body>
   <div id="stage">
-    <div id="glow"></div>
-    <div id="grid"></div>
+    <canvas id="fx"></canvas>
+    <div id="beatflash"></div>
 
     <div id="dog">
       <div id="dog-inner">
@@ -178,10 +125,6 @@
         <img id="dog-open" src="Image/dagou_open_mouth.png" alt="" draggable="false" />
       </div>
     </div>
-
-    <header><h1>大狗<em>Tap</em></h1></header>
-    <div id="hint">点 击 不 同 分 区 · 狗 叫 会 卡 在 节 拍 上</div>
-    <div id="fx"></div>
 
     <div id="overlay">
       <div class="title">大狗<em>Tap</em></div>
