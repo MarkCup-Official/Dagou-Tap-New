@@ -6,6 +6,7 @@
 <meta name="theme-color" content="#fff2dc" />
 <title>大狗Tap</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐶</text></svg>" />
+<script src="//s1.hdslb.com/bfs/seed/toy/app/sdk/toy-sdk.js"></script>
 <style>
   /* 全页面限定调色板：米白底 + 主色黄 + 次色灰（极少点缀色） */
   :root {
@@ -34,6 +35,7 @@
     inset: 0;
     overflow: hidden;
     background: var(--cream);
+    --scene-unit: 200px;
   }
 
   /* 全屏特效画布（仿 Mikutap：特效铺满全屏、层层叠加） */
@@ -41,15 +43,6 @@
     position: absolute;
     inset: 0;
     pointer-events: none;
-  }
-
-  /* 节拍呼吸闪光（主色黄，JS 按节拍驱动） */
-  #beatflash {
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    background: var(--amber);
-    opacity: 0;
   }
 
   /* 分区按钮闪光层：点击/滑过时分区短暂显示半透明白色再淡出 */
@@ -81,11 +74,17 @@
     justify-content: center;
     pointer-events: none;
     will-change: transform;
+    transform-origin: 50% 62%;   /* 节拍压缩围绕狗身体中下部进行 */
   }
   #dog-inner {
     position: relative;
-    width: min(56vmin, 400px);
-    transition: transform .55s cubic-bezier(.34, 1.9, .64, 1); /* Q弹回弹 */
+    width: var(--scene-unit);
+    will-change: transform;   /* 叫弹簧跳由 JS 逐帧驱动（无 CSS transition，保证果断跟手） */
+  }
+  /* 长按果冻层：transform / 变红滤镜全部由 JS 逐帧驱动（Q弹 + 高频抖动） */
+  #dog-jelly {
+    position: relative;
+    will-change: transform, filter;
   }
   #dog-inner img {
     width: 100%;
@@ -100,8 +99,134 @@
     opacity: 0;
     transition: opacity .08s linear;
   }
-  #dog-inner.bark { transform: scale(1.1) rotate(-2deg); }
-  #dog-inner.bark #dog-open { opacity: 1; }
+  #dog-inner.bark-image #dog-open { opacity: 1; }
+
+  /* 顶部控制：互动时隐藏，闲置 3 秒后由 JS 淡入 */
+  #top-controls {
+    position: absolute;
+    top: max(14px, env(safe-area-inset-top));
+    left: max(14px, env(safe-area-inset-left));
+    right: max(14px, env(safe-area-inset-right));
+    z-index: 20;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    opacity: 0;
+    transform: translateY(-8px);
+    pointer-events: none;
+    /* 投影放在容器上：按钮本体用了 clip-path 切角，box-shadow 会被一起裁掉，
+       容器的 drop-shadow 才能贴合八边形轮廓 */
+    filter: drop-shadow(0 6px 14px rgba(135, 131, 126, .22));
+    transition: opacity .5s ease, transform .5s cubic-bezier(.2, .8, .2, 1);
+  }
+  #top-controls.is-visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  #top-controls.is-revealing-fast {
+    transition-duration: .2s;
+  }
+  .control-group {
+    display: flex;
+    gap: 8px;
+  }
+  /* 几何化切角按钮：八边形轮廓呼应全屏几何特效（hexagon / diamond 粒子）。
+     按钮本体背景充当“描边色”，::before 用缩小一号的同款切角多边形铺底色，
+     描边因此能严格贴合切角（普通 border 做不到），颜色用变量一键切换 */
+  .control-button {
+    --btn-edge: rgba(135, 131, 126, .72);   /* 描边色 */
+    --btn-fill: rgba(255, 242, 220, .92);   /* 底色 */
+    position: relative;
+    min-width: 68px;
+    min-height: 44px;
+    padding: 8px 12px;
+    border: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    color: var(--gray);
+    background: var(--btn-edge);
+    clip-path: polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px),
+                       calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px), 0 10px);
+    font: 700 13px/1 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    cursor: pointer;
+    pointer-events: auto;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    transition: color .2s ease, background .2s ease, transform .15s ease;
+    animation: btn-pulse 2.8s cubic-bezier(.3, 1.2, .4, 1) infinite;
+  }
+  .control-button::before {
+    content: "";
+    position: absolute;
+    inset: 2px;
+    z-index: -1;
+    background: var(--btn-fill);
+    clip-path: polygon(8px 0, calc(100% - 8px) 0, 100% 8px, 100% calc(100% - 8px),
+                       calc(100% - 8px) 100%, 8px 100%, 0 calc(100% - 8px), 0 8px);
+    transition: background .2s ease;
+  }
+  /* 轻微律动：每个周期前 22% 做一次心跳式缩放（峰值约 3%），
+     三个按钮错峰跳动；不位移、幅度极小，不影响点击与可读性 */
+  @keyframes btn-pulse {
+    0%, 100% { transform: scale(1); }
+    10%      { transform: scale(1.03); }
+    22%      { transform: scale(1); }
+  }
+  #sfx-toggle     { animation-delay: .35s; }
+  #profile-button { animation-delay: .7s; }
+  .control-button:active { animation: none; transform: scale(.94); }
+  .control-button:focus-visible {
+    outline: 3px solid rgba(62, 123, 250, .38);
+    outline-offset: 2px;
+  }
+  /* 悬停描边变琥珀色（仅桌面端）；.is-muted 规则在更后面，静音态优先 */
+  @media (hover: hover) {
+    .control-button:hover { --btn-edge: rgba(255, 180, 0, .85); }
+    #profile-button:hover { --btn-fill: rgba(255, 180, 0, .18); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .control-button { animation: none; }
+  }
+  .control-button svg {
+    width: 20px;
+    height: 20px;
+    overflow: visible;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .control-button .mute-slash {
+    opacity: 0;
+    stroke: var(--coral);
+    stroke-width: 2.6;
+    transition: opacity .2s ease;
+  }
+  .control-button.is-muted {
+    --btn-edge: rgba(255, 90, 95, .68);
+    --btn-fill: rgba(255, 255, 255, .94);
+    color: var(--coral);
+  }
+  .control-button.is-muted .mute-slash { opacity: 1; }
+  #profile-button {
+    --btn-edge: rgba(255, 180, 0, .88);
+    color: #765f41;
+  }
+  @media (max-width: 430px) {
+    #top-controls {
+      top: max(10px, env(safe-area-inset-top));
+      left: max(10px, env(safe-area-inset-left));
+      right: max(10px, env(safe-area-inset-right));
+    }
+    .control-button {
+      min-width: 44px;
+      padding-inline: 10px;
+    }
+    .control-button span { display: none; }
+  }
 
   /* 开始遮罩（首次点击解锁音频） */
   #overlay {
@@ -137,14 +262,44 @@
 <body>
   <div id="stage">
     <canvas id="fx"></canvas>
-    <div id="beatflash"></div>
     <div id="zoneflash"></div>
 
     <div id="dog">
       <div id="dog-inner">
-        <img id="dog-close" src="Image/dagou_close_mouth.png" alt="大狗" draggable="false" />
-        <img id="dog-open" src="Image/dagou_open_mouth.png" alt="" draggable="false" />
+        <div id="dog-jelly">
+          <img id="dog-close" src="Image/dagou_close_mouth.png" alt="大狗" draggable="false" />
+          <img id="dog-open" src="Image/dagou_open_mouth.png" alt="" draggable="false" />
+        </div>
       </div>
+    </div>
+
+    <div id="top-controls" class="is-visible" aria-label="声音与导航控制">
+      <div class="control-group">
+        <button id="music-toggle" class="control-button" type="button" aria-label="关闭音乐" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 18V5l10-2v13" />
+            <circle cx="6" cy="18" r="3" />
+            <circle cx="16" cy="16" r="3" />
+            <path class="mute-slash" d="M4 3l16 18" />
+          </svg>
+          <span>音乐</span>
+        </button>
+        <button id="sfx-toggle" class="control-button" type="button" aria-label="关闭音效" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 9v6h4l5 4V5L9 9H5z" />
+            <path d="M17 9.5a4 4 0 010 5" />
+            <path class="mute-slash" d="M4 3l16 18" />
+          </svg>
+          <span>音效</span>
+        </button>
+      </div>
+      <button id="profile-button" class="control-button" type="button" aria-label="打开我的哔哩哔哩主页">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="8" r="4" />
+          <path d="M5 21a7 7 0 0114 0" />
+        </svg>
+        <span>主页</span>
+      </button>
     </div>
 
     <div id="overlay">
