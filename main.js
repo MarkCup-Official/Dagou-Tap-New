@@ -14,6 +14,7 @@ const BPM = 128;          // 激情劲爆的速度
 const SPB = 60 / BPM;     // 每拍秒数
 const S16 = SPB / 4;      // 16 分音符（调度步长）
 const S8  = SPB / 2;      // 8 分音符（点击量化的最小节奏点）
+const MASTER_GAIN = 0.85;
 
 /* ---------- 全局状态 ---------- */
 let ctx = null;           // AudioContext
@@ -89,7 +90,18 @@ const CONTROLS_IDLE_MS = 2000;
 const CONTROLS_HOVER_IDLE_MS = 250;
 const CREATOR_MID = '357762853';
 const CREATOR_URL = `https://space.bilibili.com/${CREATOR_MID}`;
+const FEATURED_BVID = 'BV1kNKU6REBg';
+const FEATURED_VIDEO_URL = `https://www.bilibili.com/video/${FEATURED_BVID}/`;
+const NAVIGATION_MUTE_KEY = 'dagou-navigation-muted';
 let controlsIdleTimer = 0;
+let navigationMuted = false;
+
+try {
+  navigationMuted =
+    window.sessionStorage.getItem(NAVIGATION_MUTE_KEY) === '1';
+} catch (error) {
+  console.warn('[大狗Tap] 无法读取导航临时静音状态。', error);
+}
 
 /* ---------- DOM ---------- */
 const stage     = document.getElementById('stage');
@@ -104,7 +116,9 @@ const fx2d      = fxCanvas.getContext('2d');
 const topControls = document.getElementById('top-controls');
 const musicToggle = document.getElementById('music-toggle');
 const sfxToggle = document.getElementById('sfx-toggle');
-const profileButton = document.getElementById('profile-button');
+const videoButton = document.getElementById('video-button');
+const authorLink = document.getElementById('author-link');
+const reduceUiMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 function showControls() {
   if (pointers.size > 0 || holding) return;
@@ -136,6 +150,29 @@ function setBusMuted(bus, muted) {
   bus.gain.setTargetAtTime(muted ? 0 : 1, now, 0.015);
 }
 
+function setNavigationMute(muted) {
+  navigationMuted = muted;
+
+  try {
+    if (muted) {
+      window.sessionStorage.setItem(NAVIGATION_MUTE_KEY, '1');
+    } else {
+      window.sessionStorage.removeItem(NAVIGATION_MUTE_KEY);
+    }
+  } catch (error) {
+    console.warn('[大狗Tap] 无法保存导航临时静音状态。', error);
+  }
+
+  if (!ctx || !master) return;
+  const now = ctx.currentTime;
+  master.gain.cancelScheduledValues(now);
+  master.gain.setTargetAtTime(muted ? 0 : MASTER_GAIN, now, 0.015);
+}
+
+function restoreAfterNavigation() {
+  if (navigationMuted) setNavigationMute(false);
+}
+
 function updateMuteButton(button, muted, label) {
   const action = muted ? '开启' : '关闭';
   button.classList.toggle('is-muted', muted);
@@ -162,16 +199,107 @@ function toggleSoundEffects() {
   }
 }
 
-async function openCreatorSpace() {
+function setRhythmScale(element, pulse, amount) {
+  element.style.setProperty(
+    '--rhythm-scale',
+    (1 + pulse * amount).toFixed(4)
+  );
+}
+
+/* 两行文字拆成等距字符；Created by 整体跟拍，
+   MarkCup 每拍只放大一个字母，并按 M → a → … → p 循环。 */
+const authorNameLetters = [];
+for (const line of authorLink.querySelectorAll('.author-label, .author-name')) {
+  const text = line.textContent;
+  line.textContent = '';
+  for (const char of text) {
+    const letter = document.createElement('span');
+    letter.className = 'author-letter';
+    letter.textContent = char === ' ' ? ' ' : char;   // 空格转为 nbsp，避免 inline-block 中塌陷
+    line.appendChild(letter);
+    if (line.classList.contains('author-name')) {
+      authorNameLetters.push(letter);
+    }
+  }
+}
+
+function updateAuthorNameLetters(beatIndex, pulse) {
+  const activeIndex = authorNameLetters.length
+    ? ((beatIndex % authorNameLetters.length) + authorNameLetters.length) %
+      authorNameLetters.length
+    : -1;
+
+  for (let i = 0; i < authorNameLetters.length; i++) {
+    const scale = i === activeIndex ? 1 + pulse * 0.24 : 1;
+    authorNameLetters[i].style.transform = `scale(${scale.toFixed(4)})`;
+  }
+}
+
+function updateUiRhythm(beatPosition) {
+  if (!Number.isFinite(beatPosition)) {
+    setRhythmScale(musicToggle, 0, 0.075);
+    setRhythmScale(sfxToggle, 0, 0.075);
+    setRhythmScale(videoButton, 0, 0.075);
+    authorLink.style.setProperty('--author-rhythm-scale', '1');
+    authorLink.style.setProperty('--author-lift', '0px');
+    updateAuthorNameLetters(-1, 0);
+    return;
+  }
+
+  const phase = ((beatPosition % 1) + 1) % 1;
+  const beatIndex = Math.floor(beatPosition);
+  const pulse = reduceUiMotion ? 0 : Math.pow(1 - phase, 4.5);
+  let musicPulse = 0;
+  let sfxPulse = 0;
+
+  if (!bgmMuted && !sfxMuted) {
+    if (((beatIndex % 2) + 2) % 2 === 0) musicPulse = pulse;
+    else sfxPulse = pulse;
+  } else if (!bgmMuted) {
+    musicPulse = pulse;
+  } else if (!sfxMuted) {
+    sfxPulse = pulse;
+  }
+
+  setRhythmScale(musicToggle, musicPulse, 0.075);
+  setRhythmScale(sfxToggle, sfxPulse, 0.075);
+  setRhythmScale(videoButton, pulse, 0.075);
+  authorLink.style.setProperty(
+    '--author-rhythm-scale',
+    (1 + pulse * 0.032).toFixed(4)
+  );
+  authorLink.style.setProperty(
+    '--author-lift',
+    `${(-pulse * 1.4).toFixed(3)}px`
+  );
+  updateAuthorNameLetters(beatIndex, pulse);
+}
+
+async function navigateWithToy(type, id, fallbackUrl, label) {
   try {
     if (window.toy && typeof window.toy.navigate === 'function') {
-      await window.toy.navigate({ type: 'space', id: CREATOR_MID });
+      await window.toy.navigate({ type, id });
       return;
     }
   } catch (error) {
-    console.warn('[大狗Tap] Toy 导航不可用，改用浏览器跳转。', error);
+    console.warn(`[大狗Tap] Toy ${label}导航不可用，改用浏览器跳转。`, error);
   }
-  window.location.assign(CREATOR_URL);
+  window.location.assign(fallbackUrl);
+}
+
+function openCreatorSpace() {
+  setNavigationMute(true);
+  return navigateWithToy('space', CREATOR_MID, CREATOR_URL, '主页');
+}
+
+function openFeaturedVideo() {
+  setNavigationMute(true);
+  return navigateWithToy(
+    'video',
+    FEATURED_BVID,
+    FEATURED_VIDEO_URL,
+    '视频'
+  );
 }
 
 for (const button of topControls.querySelectorAll('button')) {
@@ -192,7 +320,31 @@ for (const button of topControls.querySelectorAll('button')) {
 }
 musicToggle.addEventListener('click', toggleMusic);
 sfxToggle.addEventListener('click', toggleSoundEffects);
-profileButton.addEventListener('click', openCreatorSpace);
+videoButton.addEventListener('click', openFeaturedVideo);
+
+for (const eventName of ['pointerdown', 'pointermove', 'pointerup']) {
+  authorLink.addEventListener(eventName, (event) => event.stopPropagation());
+}
+authorLink.addEventListener('click', (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  openCreatorSpace();
+});
+
+document.addEventListener(
+  'pointerdown',
+  (event) => {
+    const target = event.target;
+    if (
+      target instanceof Element &&
+      target.closest('#music-toggle, #sfx-toggle')
+    ) {
+      return;
+    }
+    restoreAfterNavigation();
+  },
+  { capture: true }
+);
 
 /* ---------- 和弦走向：C - G - Am - F（简单洗脑） ---------- */
 const CHORDS = [
@@ -263,7 +415,7 @@ function initAudio() {
   ctx = new (window.AudioContext || window.webkitAudioContext)();
 
   master = ctx.createGain();
-  master.gain.value = 0.85;
+  master.gain.value = navigationMuted ? 0 : MASTER_GAIN;
   bgmBus = ctx.createGain();
   bgmBus.gain.value = bgmMuted ? 0 : 1;
   sfxBus = ctx.createGain();
@@ -1627,8 +1779,7 @@ function spawnEffect(zi, when) {
 
 /* 每帧绘制：固定米白背景 → 各特效（按叠放顺序） */
 function fxFrame(now) {
-  fx2d.fillStyle = C.cream;
-  fx2d.fillRect(0, 0, fxW, fxH);
+  fx2d.clearRect(0, 0, fxW, fxH);
 
   for (let i = fxList.length - 1; i >= 0; i--) {
     const inst = fxList[i];
@@ -1824,6 +1975,11 @@ function tick() {
   const now = nowSec();
   const dt = Math.min(0.05, Math.max(0.001, now - lastTick));
   lastTick = now;
+  const uiBeatPosition =
+    started && ctx && startTime > 0 && ctx.currentTime >= startTime
+      ? (ctx.currentTime - startTime) / SPB
+      : null;
+  updateUiRhythm(uiBeatPosition);
 
   if (started && ctx) {
     const t = ctx.currentTime;
