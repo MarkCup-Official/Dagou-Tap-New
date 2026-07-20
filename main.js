@@ -41,6 +41,7 @@ const flashEl   = document.getElementById('beatflash');
 const dogEl     = document.getElementById('dog');
 const dogInner  = document.getElementById('dog-inner');
 const overlay   = document.getElementById('overlay');
+const flashLayer = document.getElementById('zoneflash');
 const subEl     = overlay.querySelector('.sub');
 const fx2d      = fxCanvas.getContext('2d');
 
@@ -268,18 +269,25 @@ function buildGrid() {
   const landscape = innerWidth >= innerHeight;
   cols = landscape ? 4 : 3;
   rows = landscape ? 3 : 4;
-  // 横排 = 音节：大 / 狗 / 叫 /（叫！低音收尾）
-  const colMap = landscape
-    ? [{ n: 'da', s: '大' }, { n: 'gou', s: '狗' }, { n: 'jiao', s: '叫' }, { n: 'jiao', s: '叫！', r: 0.8 }]
-    : [{ n: 'da', s: '大' }, { n: 'gou', s: '狗' }, { n: 'jiao', s: '叫' }];
-  // 纵排 = 音高（上高下低）
-  const rowRates = landscape ? [1.33, 1.12, 1.0] : [1.5, 1.25, 1.0, 0.89];
 
   zones = [];
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const m = colMap[c];
-      zones.push({ sample: m.n, syllable: m.s, rate: rowRates[r] * (m.r || 1) });
+  if (landscape) {
+    // 横屏 3 行 4 列：竖列 = 音节，每列自上而下依次 大 / 狗 / 叫；横列 = 音高（左高右低）
+    const rowMap = [{ n: 'da', s: '大' }, { n: 'gou', s: '狗' }, { n: 'jiao', s: '叫' }];
+    const colRates = [1.5, 1.25, 1.0, 0.89];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        zones.push({ sample: rowMap[r].n, syllable: rowMap[r].s, rate: colRates[c] });
+      }
+    }
+  } else {
+    // 竖屏 4 行 3 列：横排 = 音节，每行自左而右依次 大 / 狗 / 叫；纵排 = 音高（上高下低）
+    const colMap = [{ n: 'da', s: '大' }, { n: 'gou', s: '狗' }, { n: 'jiao', s: '叫' }];
+    const rowRates = [1.5, 1.25, 1.0, 0.89];
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        zones.push({ sample: colMap[c].n, syllable: colMap[c].s, rate: rowRates[r] });
+      }
     }
   }
 }
@@ -890,6 +898,19 @@ function openMouth(holdMs) {
 /* ============================================================
  * 激活分区（点击或拖动经过）
  * ==========================================================*/
+/* 分区按钮闪光：被激活的分区短暂显示半透明白色再淡出 */
+function flashZone(zi) {
+  const r = (zi / cols) | 0, c = zi % cols;
+  const el = document.createElement('div');
+  el.className = 'zone-flash';
+  el.style.left   = `calc(${c * 100 / cols}% + 3px)`;
+  el.style.top    = `calc(${r * 100 / rows}% + 3px)`;
+  el.style.width  = `calc(${100 / cols}% - 6px)`;
+  el.style.height = `calc(${100 / rows}% - 6px)`;
+  el.addEventListener('animationend', () => el.remove());
+  flashLayer.appendChild(el);
+}
+
 function activate(zi) {
   const z = zones[zi];
   const when = quantize(S8);                  // 量化到下一个 8 分节奏点
@@ -902,6 +923,7 @@ function activate(zi) {
   const waitMs = Math.max(0, (when - ctx.currentTime) * 1000);
   openMouth(waitMs + 280);
   spawnEffect(zi, when);
+  flashZone(zi);
 }
 
 /* ============================================================

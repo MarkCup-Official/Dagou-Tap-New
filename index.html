@@ -52,10 +52,30 @@
     opacity: 0;
   }
 
+  /* 分区按钮闪光层：点击/滑过时分区短暂显示半透明白色再淡出 */
+  #zoneflash {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    pointer-events: none;
+  }
+  .zone-flash {
+    position: absolute;
+    background: #fff;
+    border-radius: 2vmin;
+    opacity: 0;
+    animation: zoneFade .45s ease-out forwards;
+  }
+  @keyframes zoneFade {
+    0%   { opacity: .45; }
+    100% { opacity: 0; }
+  }
+
   /* 大狗 */
   #dog {
     position: absolute;
     inset: 0;
+    z-index: 6;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -118,6 +138,7 @@
   <div id="stage">
     <canvas id="fx"></canvas>
     <div id="beatflash"></div>
+    <div id="zoneflash"></div>
 
     <div id="dog">
       <div id="dog-inner">
