@@ -430,26 +430,27 @@ async function openFeaturedVideo(options) {
 
   try {
     const state = await toyStateReady;
+    const wasUnlocked = state.sfxUnlocked;
+    let unlockedNow = false;
+
+    const unlockForCurrentPage = () => {
+      if (wasUnlocked) return;
+      unlockedNow = true;
+      if (!state.sfxUnlocked) {
+        state.sfxUnlocked = true;
+        renderToyCloudState();
+      }
+    };
+
+    if (optimisticUnlock) unlockForCurrentPage();
+
     if (!state.environmentAvailable || !state.toy) {
+      unlockForCurrentPage();
       setNavigationMute(true);
       window.location.assign(FEATURED_VIDEO_URL);
       return;
     }
 
-    const wasUnlocked = state.sfxUnlocked;
-    if (optimisticUnlock && !wasUnlocked) {
-      state.sfxUnlocked = true;
-      renderToyCloudState();
-    }
-    if (optimisticUnlock && !state.cloudReadable) {
-      showToyNotice(
-        '解锁失败，请确认已登录哔哩哔哩后刷新重试。',
-        true
-      );
-      return;
-    }
-
-    let unlockedNow = false;
     if (state.cloudReadable && !wasUnlocked) {
       try {
         await state.toy.setCloudStorage({
@@ -458,19 +459,19 @@ async function openFeaturedVideo(options) {
       } catch (error) {
         markToyCloudUnavailable(state);
         console.warn('[大狗Tap] 音效解锁状态写入失败。', error);
-        showToyNotice(
-          '解锁失败，请确认已登录哔哩哔哩后刷新重试。',
-          true
-        );
-        return;
+        unlockForCurrentPage();
+        showToyNotice('云存档不可用，本次已临时解锁。');
       }
 
-      state.sfxUnlocked = true;
-      unlockedNow = true;
-      renderToyCloudState();
-      if (delayAfterCloudWriteMs > 0) {
+      if (state.cloudReadable) {
+        unlockForCurrentPage();
+      }
+      if (state.cloudReadable && delayAfterCloudWriteMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, delayAfterCloudWriteMs));
       }
+    } else if (!state.cloudReadable && !wasUnlocked) {
+      unlockForCurrentPage();
+      showToyNotice('云存档不可用，本次已临时解锁。');
     }
 
     try {
@@ -806,22 +807,6 @@ function markAllSfxNewSeen() {
   persistSeenState(items);
 }
 
-async function requireToyCloudContext() {
-  const state = await toyStateReady;
-  if (!state.environmentAvailable || !state.toy) {
-    showToyNotice('请在B站打开此页面后再解锁', true);
-    return null;
-  }
-  if (!state.cloudReadable) {
-    showToyNotice(
-      '云端状态读取失败，请确认已登录哔哩哔哩后刷新重试。',
-      true
-    );
-    return null;
-  }
-  return state;
-}
-
 function openUnlockConfirm(unlockItem, trigger) {
   if (unlockConfirmOpen || videoUnlockPending) return;
   const itemLabel = unlockItem === 'emperor'
@@ -1028,8 +1013,7 @@ async function handleSfxOptionClick(option) {
     return;
   }
 
-  const state = await requireToyCloudContext();
-  if (!state) return;
+  const state = await toyStateReady;
   if (!state.sfxUnlocked) {
     openUnlockConfirm('dingdong', option);
     return;
@@ -1053,8 +1037,7 @@ async function handleSkinOptionClick(button) {
     return;
   }
 
-  const state = await requireToyCloudContext();
-  if (!state) return;
+  const state = await toyStateReady;
   if (!state.sfxUnlocked) {
     openUnlockConfirm('emperor', button);
     return;
