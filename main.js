@@ -15,6 +15,11 @@ const SPB = 60 / BPM;     // 每拍秒数
 const S16 = SPB / 4;      // 16 分音符（调度步长）
 const S8  = SPB / 2;      // 8 分音符（点击量化的最小节奏点）
 const MASTER_GAIN = 0.85;
+const DEFAULT_PERFORMANCE_SETTINGS = Object.freeze({
+  pianoMode: false,
+  rhythmSnap: true,
+  showGrid: false,
+});
 
 /* ---------- 全局状态 ---------- */
 let ctx = null;           // AudioContext
@@ -25,13 +30,45 @@ let noiseBuf = null;      // 白噪声（鼓组用）
 let started = false;
 let bgmMuted = false;
 let sfxMuted = false;
+const performanceSettings = { ...DEFAULT_PERFORMANCE_SETTINGS };
+let performanceSettingsSaving = false;
 
 let startTime = 0;        // 第 0 步对应的 audio 时间
 let nextNoteTime = 0;     // 调度器下一个音符时间
 let stepCount = 0;        // 16 分步进计数（0..63 循环 = 4 小节）
 
-const buffers = {};       // 解码后的狗叫样本
+const SFX_SAMPLE_SETS = Object.freeze({
+  dagou: Object.freeze({ da: 'da', gou: 'gou', jiao: 'jiao' }),
+  hajimi: Object.freeze({ da: 'ha', gou: 'ji', jiao: 'mi' }),
+  dingdong: Object.freeze({
+    da: 'dingdongji_ding',
+    gou: 'dingdongji_dong',
+    jiao: 'dingdongji_ji',
+  }),
+});
+const CHARACTER_IMAGE_SETS = Object.freeze({
+  dagou: Object.freeze({
+    close: 'Image/dagou_close_mouth.png',
+    open: 'Image/dagou_open_mouth.png',
+    alt: '大狗',
+  }),
+  dingdong: Object.freeze({
+    close: 'Image/dingdongji_close_mouth.png',
+    open: 'Image/dingdongji_open_mouth.png',
+    alt: '叮咚鸡',
+  }),
+  hajimi: Object.freeze({
+    close: 'Image/maodie_close_mouth.png',
+    open: 'Image/maodie_open_mouth.png',
+    alt: '哈基米',
+  }),
+});
+const RUNTIME_SAMPLE_NAMES = Object.freeze(
+  [...new Set(Object.values(SFX_SAMPLE_SETS).flatMap(Object.values))]
+);
+const buffers = {};       // 解码后的音效样本
 const sustainLoops = {};  // 从原样本中实时构建的 WSOLA 延音纹理
+let selectedSfxId = 'dagou';
 
 // 每条纹理由多个波形相似的语音帧重叠生成。帧位置按黄金分割序列变化，
 // 再在目标附近寻找相关度最高的波形，避免固定短片段形成可辨识的循环节。
@@ -53,6 +90,20 @@ const SUSTAIN_REGIONS = {
     regionStart: 0.125, regionEnd: 0.290,
     frame: 0.100, overlap: 0.050, search: 0.012,
     wrapBlend: 0.040, textureDuration: 12.37, seed: 0.71,
+    preferFrameEntry: true,
+  },
+  mi: {
+    enabled: true,
+    regionStart: 0.245, regionEnd: 0.345,
+    frame: 0.070, overlap: 0.035, search: 0.008,
+    wrapBlend: 0.028, textureDuration: 12.11, seed: 0.29,
+    preferFrameEntry: true,
+  },
+  dingdongji_ji: {
+    enabled: true,
+    regionStart: 0.120, regionEnd: 0.310,
+    frame: 0.100, overlap: 0.050, search: 0.012,
+    wrapBlend: 0.040, textureDuration: 11.83, seed: 0.53,
     preferFrameEntry: true,
   },
 };
@@ -93,6 +144,24 @@ const CREATOR_URL = `https://space.bilibili.com/${CREATOR_MID}`;
 const FEATURED_BVID = 'BV1kNKU6REBg';
 const FEATURED_VIDEO_URL = `https://www.bilibili.com/video/${FEATURED_BVID}/`;
 const NAVIGATION_MUTE_KEY = 'dagou-navigation-muted';
+const TOY_CLOUD_KEYS = Object.freeze({
+  sfxUnlocked: 'dagou_sfx_unlocked_v1',
+  settingsSeen: 'dagou_settings_seen_v1',
+  dingdongNewSeen: 'dagou_dingdong_new_seen_v1',
+  hajimiNewSeen: 'dagou_hajimi_new_seen_v1',
+  pianoMode: 'dagou_piano_mode_v1',
+  rhythmSnap: 'dagou_rhythm_snap_v1',
+  showGrid: 'dagou_show_grid_v1',
+});
+const TOY_CLOUD_KEY_LIST = Object.freeze(Object.values(TOY_CLOUD_KEYS));
+const TOY_REQUIRED_ABILITIES = Object.freeze([
+  'getUserProfile',
+  'getCloudStorage',
+  'setCloudStorage',
+  'navigate',
+]);
+const LOCKED_SFX_IDS = new Set(['dingdong', 'hajimi']);
+const DEBUG_UNLOCK_SFX = false; // 临时调试：发布前改回 false，恢复 Toy 云端锁定。
 let controlsIdleTimer = 0;
 let navigationMuted = false;
 
@@ -109,14 +178,32 @@ const fxCanvas  = document.getElementById('fx');
 const dogEl     = document.getElementById('dog');
 const dogInner  = document.getElementById('dog-inner');
 const dogJelly  = document.getElementById('dog-jelly');
+const dogCloseImage = document.getElementById('dog-close');
+const dogOpenImage = document.getElementById('dog-open');
 const overlay   = document.getElementById('overlay');
+const keyGrid   = document.getElementById('key-grid');
 const flashLayer = document.getElementById('zoneflash');
 const subEl     = overlay.querySelector('.sub');
 const fx2d      = fxCanvas.getContext('2d');
 const topControls = document.getElementById('top-controls');
 const musicToggle = document.getElementById('music-toggle');
 const sfxToggle = document.getElementById('sfx-toggle');
-const videoButton = document.getElementById('video-button');
+const settingsButton = document.getElementById('settings-button');
+const updateDot = document.getElementById('update-dot');
+const settingsOverlay = document.getElementById('settings-overlay');
+const settingsPanel = document.getElementById('settings-panel');
+const settingsClose = document.getElementById('settings-close');
+const authorHomeButton = document.getElementById('author-home-button');
+const videoCard = document.getElementById('video-card');
+const videoPlay = videoCard.querySelector('.video-play');
+const sfxOptions = [...document.querySelectorAll('.sfx-option')];
+const performanceSettingButtons = [
+  ...document.querySelectorAll('.setting-row[data-setting]'),
+];
+const performanceSettingsStatus = document.getElementById(
+  'performance-settings-status'
+);
+const toyNotice = document.getElementById('toy-notice');
 const authorLink = document.getElementById('author-link');
 const reduceUiMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -239,7 +326,9 @@ function updateUiRhythm(beatPosition) {
   if (!Number.isFinite(beatPosition)) {
     setRhythmScale(musicToggle, 0, 0.075);
     setRhythmScale(sfxToggle, 0, 0.075);
-    setRhythmScale(videoButton, 0, 0.075);
+    setRhythmScale(settingsButton, 0, 0.075);
+    setRhythmScale(updateDot, 0, 0.4);
+    setRhythmScale(videoPlay, 0, 0.12);
     authorLink.style.setProperty('--author-rhythm-scale', '1');
     authorLink.style.setProperty('--author-lift', '0px');
     updateAuthorNameLetters(-1, 0);
@@ -263,7 +352,9 @@ function updateUiRhythm(beatPosition) {
 
   setRhythmScale(musicToggle, musicPulse, 0.075);
   setRhythmScale(sfxToggle, sfxPulse, 0.075);
-  setRhythmScale(videoButton, pulse, 0.075);
+  setRhythmScale(settingsButton, pulse, 0.075);
+  setRhythmScale(updateDot, pulse, 0.4);
+  setRhythmScale(videoPlay, pulse, 0.12);
   authorLink.style.setProperty(
     '--author-rhythm-scale',
     (1 + pulse * 0.032).toFixed(4)
@@ -292,14 +383,59 @@ function openCreatorSpace() {
   return navigateWithToy('space', CREATOR_MID, CREATOR_URL, '主页');
 }
 
-function openFeaturedVideo() {
-  setNavigationMute(true);
-  return navigateWithToy(
-    'video',
-    FEATURED_BVID,
-    FEATURED_VIDEO_URL,
-    '视频'
-  );
+let videoUnlockPending = false;
+
+async function openFeaturedVideo() {
+  if (videoUnlockPending) return;
+  videoUnlockPending = true;
+  videoCard.setAttribute('aria-busy', 'true');
+
+  try {
+    const state = await toyStateReady;
+    if (!state.environmentAvailable || !state.toy) {
+      setNavigationMute(true);
+      window.location.assign(FEATURED_VIDEO_URL);
+      return;
+    }
+
+    let unlockedNow = false;
+    if (state.cloudReadable && !state.sfxUnlocked) {
+      try {
+        await state.toy.setCloudStorage({
+          [TOY_CLOUD_KEYS.sfxUnlocked]: '1',
+        });
+      } catch (error) {
+        markToyCloudUnavailable(state);
+        console.warn('[大狗Tap] 音效解锁状态写入失败。', error);
+        showToyNotice(
+          '解锁失败，请确认已登录哔哩哔哩后刷新重试。',
+          true
+        );
+        return;
+      }
+
+      state.sfxUnlocked = true;
+      unlockedNow = true;
+      renderToyCloudState();
+    }
+
+    try {
+      setNavigationMute(true);
+      await state.toy.navigate({ type: 'video', id: FEATURED_BVID });
+    } catch (error) {
+      setNavigationMute(false);
+      console.warn('[大狗Tap] Toy 视频导航失败。', error);
+      showToyNotice(
+        unlockedNow
+          ? '已完成解锁，但视频打开失败，请稍后重试。'
+          : '视频打开失败，请稍后重试。',
+        true
+      );
+    }
+  } finally {
+    videoUnlockPending = false;
+    videoCard.removeAttribute('aria-busy');
+  }
 }
 
 for (const button of topControls.querySelectorAll('button')) {
@@ -307,7 +443,10 @@ for (const button of topControls.querySelectorAll('button')) {
     if (event.pointerType === 'mouse') accelerateControlsReveal();
   });
   button.addEventListener('click', (event) => {
-    if (!topControls.classList.contains('is-visible')) {
+    const pinnedSettingsButton =
+      button === settingsButton &&
+      topControls.classList.contains('has-update-dot');
+    if (!topControls.classList.contains('is-visible') && !pinnedSettingsButton) {
       event.preventDefault();
       event.stopImmediatePropagation();
       accelerateControlsReveal();
@@ -320,7 +459,451 @@ for (const button of topControls.querySelectorAll('button')) {
 }
 musicToggle.addEventListener('click', toggleMusic);
 sfxToggle.addEventListener('click', toggleSoundEffects);
-videoButton.addEventListener('click', openFeaturedVideo);
+
+/* ---------- 设置菜单与 Toy 云状态 ---------- */
+let settingsOpen = false;
+let toyNoticeTimer = 0;
+const toyCloudState = {
+  toy: null,
+  initialized: false,
+  environmentAvailable: false,
+  cloudReadable: false,
+  sfxUnlocked: DEBUG_UNLOCK_SFX,
+  settingsSeen: false,
+  newSeen: {
+    dingdong: false,
+    hajimi: false,
+  },
+  locallyChanged: {
+    settingsSeen: false,
+    dingdong: false,
+    hajimi: false,
+  },
+};
+const PERFORMANCE_SETTING_KEYS = Object.freeze({
+  pianoMode: TOY_CLOUD_KEYS.pianoMode,
+  rhythmSnap: TOY_CLOUD_KEYS.rhythmSnap,
+  showGrid: TOY_CLOUD_KEYS.showGrid,
+});
+
+function showToyNotice(message, isError = false) {
+  clearTimeout(toyNoticeTimer);
+  toyNotice.textContent = message;
+  toyNotice.classList.toggle('is-error', isError);
+  toyNotice.classList.add('is-visible');
+  toyNotice.setAttribute('aria-hidden', 'false');
+  toyNoticeTimer = setTimeout(() => {
+    toyNotice.classList.remove('is-visible');
+    toyNotice.setAttribute('aria-hidden', 'true');
+  }, 4800);
+}
+
+function clearQueuedPerformanceInput() {
+  inputQueue.length = 0;
+  lastCommittedInputTime = -Infinity;
+  clearInputVisualTimers();
+  for (const state of pointers.values()) state.pendingEntryId = null;
+}
+
+function renderKeyGrid() {
+  keyGrid.style.setProperty('--key-grid-cols', String(cols));
+  keyGrid.style.setProperty('--key-grid-rows', String(rows));
+  keyGrid.classList.toggle('is-visible', performanceSettings.showGrid);
+
+  const fragment = document.createDocumentFragment();
+  for (const zone of zones) {
+    const cell = document.createElement('div');
+    cell.className = 'key-grid-cell';
+    cell.dataset.sample = zone.sample;
+    if (zone.note) cell.dataset.note = zone.note;
+    fragment.appendChild(cell);
+  }
+  keyGrid.replaceChildren(fragment);
+}
+
+function applyPerformanceSettings(previousSettings) {
+  if (
+    previousSettings &&
+    previousSettings.rhythmSnap !== performanceSettings.rhythmSnap
+  ) {
+    // 切换量化方式时丢弃尚未发声的旧队列，避免旧模式的声音滞后冒出。
+    clearQueuedPerformanceInput();
+  }
+
+  if (
+    zones.length === 0 ||
+    !previousSettings ||
+    previousSettings.pianoMode !== performanceSettings.pianoMode
+  ) {
+    buildGrid();
+  } else {
+    renderKeyGrid();
+  }
+}
+
+function replacePerformanceSettings(nextSettings) {
+  const previousSettings = { ...performanceSettings };
+  for (const key of Object.keys(DEFAULT_PERFORMANCE_SETTINGS)) {
+    performanceSettings[key] = nextSettings[key] === true;
+  }
+  applyPerformanceSettings(previousSettings);
+}
+
+function resetPerformanceSettingsToDefaults() {
+  replacePerformanceSettings(DEFAULT_PERFORMANCE_SETTINGS);
+}
+
+function markToyCloudUnavailable(state = toyCloudState) {
+  state.cloudReadable = false;
+  renderToyCloudState();
+}
+
+function readCloudPerformanceSettings(cloud) {
+  const settings = { ...DEFAULT_PERFORMANCE_SETTINGS };
+  for (const [settingName, cloudKey] of Object.entries(PERFORMANCE_SETTING_KEYS)) {
+    const value = cloud[cloudKey];
+    if (value === '1') settings[settingName] = true;
+    else if (value === '0') settings[settingName] = false;
+  }
+  return settings;
+}
+
+function renderPerformanceSettings() {
+  const cloudAvailable =
+    toyCloudState.initialized &&
+    toyCloudState.environmentAvailable &&
+    toyCloudState.cloudReadable;
+
+  for (const button of performanceSettingButtons) {
+    const settingName = button.dataset.setting;
+    button.setAttribute(
+      'aria-checked',
+      String(performanceSettings[settingName] === true)
+    );
+    button.disabled = !toyCloudState.initialized || performanceSettingsSaving;
+  }
+
+  performanceSettingsStatus.classList.toggle(
+    'is-error',
+    toyCloudState.initialized && !cloudAvailable
+  );
+  if (performanceSettingsSaving) {
+    performanceSettingsStatus.textContent = '正在保存到哔哩哔哩云端…';
+  } else if (!toyCloudState.initialized) {
+    performanceSettingsStatus.textContent = '正在读取哔哩哔哩云端设置…';
+  } else if (cloudAvailable) {
+    performanceSettingsStatus.textContent = '设置已通过哔哩哔哩云端同步';
+  } else {
+    performanceSettingsStatus.textContent = '云存储不可用，本次设置仅在当前页面有效';
+  }
+}
+
+function renderToyCloudState() {
+  const showUpdateDot = !toyCloudState.settingsSeen;
+  updateDot.classList.toggle('is-hidden', !showUpdateDot);
+  topControls.classList.toggle('has-update-dot', showUpdateDot);
+
+  for (const option of sfxOptions) {
+    const sfxId = option.dataset.sfx;
+    const isCloudLockedOption = LOCKED_SFX_IDS.has(sfxId);
+    const locked = isCloudLockedOption && !toyCloudState.sfxUnlocked;
+    option.classList.toggle('is-locked', locked);
+
+    if (isCloudLockedOption) {
+      const label = sfxId === 'dingdong' ? '叮咚鸡' : '哈基米';
+      option.setAttribute('aria-label', locked ? `${label}，未解锁` : label);
+      option.classList.toggle('is-new-hidden', toyCloudState.newSeen[sfxId]);
+    }
+  }
+  renderPerformanceSettings();
+}
+
+async function detectToyEnvironment() {
+  const toy = window.toy;
+  if (
+    !toy ||
+    typeof toy.isSupport !== 'function' ||
+    TOY_REQUIRED_ABILITIES.some((ability) => typeof toy[ability] !== 'function')
+  ) {
+    return null;
+  }
+
+  try {
+    const support = await Promise.all(
+      TOY_REQUIRED_ABILITIES.map((ability) => toy.isSupport(ability))
+    );
+    if (support.some((available) => available !== true)) return null;
+
+    const profile = await toy.getUserProfile();
+    const nickname = typeof profile?.nickname === 'string'
+      ? profile.nickname.trim()
+      : '';
+    const avatar = typeof profile?.avatar === 'string'
+      ? profile.avatar.trim()
+      : '';
+    if (!nickname || !avatar) return null;
+
+    return toy;
+  } catch (error) {
+    console.warn('[大狗Tap] Toy 站内环境检测失败。', error);
+    return null;
+  }
+}
+
+async function initializeToyCloudState() {
+  const toy = await detectToyEnvironment();
+  if (!toy) {
+    toyCloudState.initialized = true;
+    resetPerformanceSettingsToDefaults();
+    renderToyCloudState();
+    return toyCloudState;
+  }
+
+  toyCloudState.toy = toy;
+  toyCloudState.environmentAvailable = true;
+
+  try {
+    const cloud = await toy.getCloudStorage(TOY_CLOUD_KEY_LIST);
+    if (!cloud || typeof cloud !== 'object') {
+      throw new Error('Toy 云存储返回值无效');
+    }
+    toyCloudState.cloudReadable = true;
+    toyCloudState.sfxUnlocked =
+      DEBUG_UNLOCK_SFX || cloud[TOY_CLOUD_KEYS.sfxUnlocked] === '1';
+    replacePerformanceSettings(readCloudPerformanceSettings(cloud));
+
+    if (!toyCloudState.locallyChanged.settingsSeen) {
+      toyCloudState.settingsSeen =
+        cloud[TOY_CLOUD_KEYS.settingsSeen] === '1';
+    }
+    if (!toyCloudState.locallyChanged.dingdong) {
+      toyCloudState.newSeen.dingdong =
+        cloud[TOY_CLOUD_KEYS.dingdongNewSeen] === '1';
+    }
+    if (!toyCloudState.locallyChanged.hajimi) {
+      toyCloudState.newSeen.hajimi =
+        cloud[TOY_CLOUD_KEYS.hajimiNewSeen] === '1';
+    }
+  } catch (error) {
+    // 读取不可用时，三个演奏设置也必须整体保持默认值。
+    toyCloudState.cloudReadable = false;
+    resetPerformanceSettingsToDefaults();
+    console.warn('[大狗Tap] Toy 云状态读取失败。', error);
+  }
+
+  toyCloudState.initialized = true;
+  renderToyCloudState();
+  return toyCloudState;
+}
+
+function persistSeenState(items) {
+  void toyStateReady.then(async (state) => {
+    if (!state.environmentAvailable || !state.cloudReadable || !state.toy) return;
+
+    try {
+      await state.toy.setCloudStorage(items);
+    } catch (error) {
+      markToyCloudUnavailable(state);
+      console.warn('[大狗Tap] 提醒状态写入失败。', error);
+      showToyNotice(
+        '状态保存失败，请确认已登录哔哩哔哩后刷新重试。',
+        true
+      );
+    }
+  });
+}
+
+function markSettingsSeen() {
+  if (toyCloudState.settingsSeen) return;
+  toyCloudState.settingsSeen = true;
+  toyCloudState.locallyChanged.settingsSeen = true;
+  renderToyCloudState();
+  persistSeenState({ [TOY_CLOUD_KEYS.settingsSeen]: '1' });
+}
+
+function markSfxNewSeen(sfxId) {
+  if (!LOCKED_SFX_IDS.has(sfxId) || toyCloudState.newSeen[sfxId]) return;
+  toyCloudState.newSeen[sfxId] = true;
+  toyCloudState.locallyChanged[sfxId] = true;
+  renderToyCloudState();
+  const key = sfxId === 'dingdong'
+    ? TOY_CLOUD_KEYS.dingdongNewSeen
+    : TOY_CLOUD_KEYS.hajimiNewSeen;
+  persistSeenState({ [key]: '1' });
+}
+
+function markAllSfxNewSeen() {
+  const items = {};
+  for (const sfxId of LOCKED_SFX_IDS) {
+    if (toyCloudState.newSeen[sfxId]) continue;
+    toyCloudState.newSeen[sfxId] = true;
+    toyCloudState.locallyChanged[sfxId] = true;
+    const key = sfxId === 'dingdong'
+      ? TOY_CLOUD_KEYS.dingdongNewSeen
+      : TOY_CLOUD_KEYS.hajimiNewSeen;
+    items[key] = '1';
+  }
+
+  if (Object.keys(items).length === 0) return;
+  renderToyCloudState();
+  persistSeenState(items);
+}
+
+async function requireToyCloudContext() {
+  const state = await toyStateReady;
+  if (!state.environmentAvailable || !state.toy) {
+    showToyNotice('请在哔哩哔哩内打开', true);
+    return null;
+  }
+  if (!state.cloudReadable) {
+    showToyNotice(
+      '云端状态读取失败，请确认已登录哔哩哔哩后刷新重试。',
+      true
+    );
+    return null;
+  }
+  return state;
+}
+
+function selectSfxOption(option) {
+  selectedSfxId = SFX_SAMPLE_SETS[option.dataset.sfx]
+    ? option.dataset.sfx
+    : 'dagou';
+  const characterImages = CHARACTER_IMAGE_SETS[selectedSfxId]
+    ?? CHARACTER_IMAGE_SETS.dagou;
+  dogCloseImage.src = characterImages.close;
+  dogCloseImage.alt = characterImages.alt;
+  dogOpenImage.src = characterImages.open;
+  dogInner.classList.toggle('is-hajimi', selectedSfxId === 'hajimi');
+  for (const other of sfxOptions) {
+    const selected = other === option;
+    other.classList.toggle('is-active', selected);
+    other.setAttribute('aria-checked', String(selected));
+  }
+}
+
+function resolveSfxSample(sample, sfxId = selectedSfxId) {
+  return SFX_SAMPLE_SETS[sfxId]?.[sample] ?? sample;
+}
+
+renderToyCloudState();
+const toyStateReady = initializeToyCloudState();
+
+async function handlePerformanceSettingClick(button) {
+  if (performanceSettingsSaving) return;
+  const settingName = button.dataset.setting;
+  const cloudKey = PERFORMANCE_SETTING_KEYS[settingName];
+  if (!cloudKey) return;
+
+  const state = await toyStateReady;
+  const nextValue = !performanceSettings[settingName];
+  if (!state.environmentAvailable || !state.cloudReadable || !state.toy) {
+    replacePerformanceSettings({
+      ...performanceSettings,
+      [settingName]: nextValue,
+    });
+    renderToyCloudState();
+    showToyNotice('云存储不可用，本次设置仅在当前页面有效。');
+    return;
+  }
+
+  performanceSettingsSaving = true;
+  renderPerformanceSettings();
+  try {
+    await state.toy.setCloudStorage({
+      [cloudKey]: nextValue ? '1' : '0',
+    });
+    replacePerformanceSettings({
+      ...performanceSettings,
+      [settingName]: nextValue,
+    });
+  } catch (error) {
+    // 写入失败后降级为本地会话设置，保留用户刚刚选择的值。
+    markToyCloudUnavailable(state);
+    replacePerformanceSettings({
+      ...performanceSettings,
+      [settingName]: nextValue,
+    });
+    console.warn('[大狗Tap] 演奏设置写入失败。', error);
+    showToyNotice('云存储不可用，本次设置仅在当前页面有效。');
+  } finally {
+    performanceSettingsSaving = false;
+    renderToyCloudState();
+  }
+}
+
+for (const button of performanceSettingButtons) {
+  button.addEventListener('click', () => {
+    void handlePerformanceSettingClick(button);
+  });
+}
+
+function openSettings() {
+  if (settingsOpen) return;
+  markSettingsSeen();
+  settingsOpen = true;
+  settingsOverlay.classList.add('is-open');
+  settingsOverlay.setAttribute('aria-hidden', 'false');
+  settingsClose.focus({ preventScroll: true });
+}
+
+function closeSettings() {
+  if (!settingsOpen) return;
+  markAllSfxNewSeen();
+  settingsOpen = false;
+  settingsOverlay.classList.remove('is-open');
+  settingsOverlay.setAttribute('aria-hidden', 'true');
+  settingsButton.focus({ preventScroll: true });
+}
+
+settingsButton.addEventListener('click', openSettings);
+settingsClose.addEventListener('click', closeSettings);
+/* 点击面板外的半透明背景关闭；面板上的事件全部拦截，不穿透到游戏区 */
+settingsOverlay.addEventListener('pointerdown', (event) => {
+  if (event.target === settingsOverlay) closeSettings();
+});
+for (const eventName of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+  settingsOverlay.addEventListener(eventName, (event) => event.stopPropagation());
+}
+settingsPanel.addEventListener('click', (event) => event.stopPropagation());
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closeSettings();
+});
+
+authorHomeButton.addEventListener('click', openCreatorSpace);
+videoCard.addEventListener('click', openFeaturedVideo);
+
+async function handleSfxOptionClick(option) {
+  const sfxId = option.dataset.sfx;
+  if (!LOCKED_SFX_IDS.has(sfxId)) {
+    selectSfxOption(option);
+    return;
+  }
+
+  markSfxNewSeen(sfxId);
+  if (toyCloudState.sfxUnlocked) {
+    selectSfxOption(option);
+    return;
+  }
+
+  const state = await requireToyCloudContext();
+  if (!state) return;
+  if (!state.sfxUnlocked) {
+    showToyNotice(
+      '该音效尚未解锁，请点击上方开发视频，观看一次即可解锁。'
+    );
+    return;
+  }
+
+  selectSfxOption(option);
+}
+
+/* 三套音效都保留 da / gou / jiao 的语义位置，只替换实际播放采样。 */
+for (const option of sfxOptions) {
+  option.addEventListener('click', () => {
+    void handleSfxOptionClick(option);
+  });
+}
 
 for (const eventName of ['pointerdown', 'pointermove', 'pointerup']) {
   authorLink.addEventListener(eventName, (event) => event.stopPropagation());
@@ -356,20 +939,60 @@ const CHORDS = [
 const HAT_VEL = [0.34, 0.16, 0.42, 0.16];
 
 // tools/analyze_pitch.py 实测所得：高能量、高置信度有声帧 MIDI 的加权中位数。
-// 三段原音音高不一致，因此每个按键都从各自锚点反推固定目标音的 playbackRate。
+// 每段原音音高不一致，因此每个按键都从各自锚点反推固定目标音的 playbackRate。
 const BARK_SOURCE_MIDI = Object.freeze({
   da: 71.1950846771,
   gou: 65.5950930881,
   jiao: 71.1226079346,
+  ha: 72.6652936920031,
+  ji: 67.55506219280217,
+  mi: 65.47641325112846,
+  dingdongji_ding: 68.72369809072657,
+  dingdongji_dong: 68.20736701647688,
+  dingdongji_ji: 69.48535473104747,
 });
 
 // 固定 A 小调五声音阶（A–C–D–E–G）。第三列 / 第三行是最接近
-// 对应原声音高的音：da / jiao → C5，gou → G4。
+// 对应原声音高的音：da / jiao / ha → C5，gou / ji → G4，mi → E4，
+// 叮咚鸡三段 → A4。
 const BARK_TARGET_MIDI = Object.freeze({
   da: Object.freeze([79, 76, 72, 69]),    // G5, E5, C5, A4
   gou: Object.freeze([72, 69, 67, 64]),   // C5, A4, G4, E4
   jiao: Object.freeze([79, 76, 72, 69]),  // G5, E5, C5, A4
+  ha: Object.freeze([79, 76, 72, 69]),    // G5, E5, C5, A4
+  ji: Object.freeze([72, 69, 67, 64]),    // C5, A4, G4, E4
+  mi: Object.freeze([69, 67, 64, 62]),    // A4, G4, E4, D4
+  dingdongji_ding: Object.freeze([74, 72, 69, 67]), // D5, C5, A4, G4
+  dingdongji_dong: Object.freeze([74, 72, 69, 67]), // D5, C5, A4, G4
+  dingdongji_ji: Object.freeze([74, 72, 69, 67]),   // D5, C5, A4, G4
 });
+
+// 20 ms 有声帧门限 RMS，以 da.wav 为响度基准。Web Audio 使用浮点链路，
+// 较大的音色补偿会先经过现有 DynamicsCompressor，再输出到设备。
+const SFX_SAMPLE_GAIN = Object.freeze({
+  da: 1.0000000000,
+  gou: 1.012898017161218,
+  jiao: 0.953577156471302,
+  ha: 1.283378415934229,
+  ji: 1.4777851484035351,
+  mi: 1.4846115949156913,
+  dingdongji_ding: 2.5889190244772604,
+  dingdongji_dong: 2.3637451111911507,
+  dingdongji_ji: 2.3501763429894065,
+});
+
+// 钢琴模式使用 C 大调白键。前七键严格覆盖 C4–B4，第八键以 C5
+// 闭合一个完整八度（do–re–mi–fa–sol–la–si–do）。
+const PIANO_SCALE = Object.freeze([
+  Object.freeze({ midi: 60, note: 'C4', solfege: 'do' }),
+  Object.freeze({ midi: 62, note: 'D4', solfege: 're' }),
+  Object.freeze({ midi: 64, note: 'E4', solfege: 'mi' }),
+  Object.freeze({ midi: 65, note: 'F4', solfege: 'fa' }),
+  Object.freeze({ midi: 67, note: 'G4', solfege: 'sol' }),
+  Object.freeze({ midi: 69, note: 'A4', solfege: 'la' }),
+  Object.freeze({ midi: 71, note: 'B4', solfege: 'si' }),
+  Object.freeze({ midi: 72, note: 'C5', solfege: 'do' }),
+]);
 
 /* ============================================================
  * 主色调色板（全页面只用这几支颜色）
@@ -447,9 +1070,13 @@ function b64ToArrayBuffer(b64) {
 }
 
 async function loadSamples() {
-  for (const n of ['da', 'gou', 'jiao']) {
-    buffers[n] = await ctx.decodeAudioData(b64ToArrayBuffer(AUDIO_B64[n]));
-    sustainLoops[n] = SUSTAIN_REGIONS[n].enabled
+  for (const n of RUNTIME_SAMPLE_NAMES) {
+    const encoded = AUDIO_B64[n];
+    if (typeof encoded !== 'string' || encoded.length === 0) {
+      throw new Error(`Missing embedded audio sample: ${n}`);
+    }
+    buffers[n] = await ctx.decodeAudioData(b64ToArrayBuffer(encoded));
+    sustainLoops[n] = SUSTAIN_REGIONS[n]?.enabled
       ? buildSustainTexture(buffers[n], SUSTAIN_REGIONS[n])
       : null;
   }
@@ -810,9 +1437,11 @@ function quantize(unit) {
   return t;
 }
 
-function barkPlaybackRate(sample, pitchTier) {
+function barkPlaybackRate(sample, pitchTier, fixedTargetMidi) {
   const sourceMidi = BARK_SOURCE_MIDI[sample];
-  const targetMidi = BARK_TARGET_MIDI[sample]?.[pitchTier];
+  const targetMidi = Number.isFinite(fixedTargetMidi)
+    ? fixedTargetMidi
+    : BARK_TARGET_MIDI[sample]?.[pitchTier];
   if (!Number.isFinite(sourceMidi) || !Number.isFinite(targetMidi)) {
     throw new Error(`No fixed pitch target for ${sample}, tier ${pitchTier}`);
   }
@@ -848,7 +1477,7 @@ function createTailSource(voice, boundary, sourceOffset) {
   const gain = ctx.createGain();
   source.buffer = voice.sourceBuffer;
   source.playbackRate.setValueAtTime(voice.rate, boundary);
-  gain.gain.setValueAtTime(1, boundary);
+  gain.gain.setValueAtTime(voice.sampleGain, boundary);
   source.connect(gain);
   gain.connect(sfxBus);
   source.start(boundary, sourceOffset);
@@ -863,13 +1492,21 @@ function createTailSource(voice, boundary, sourceOffset) {
 function playPressVoice(name, rate, when) {
   const sourceBuffer = buffers[name];
   const sustain = sustainLoops[name];
+  const sampleGain = SFX_SAMPLE_GAIN[name] ?? 1;
 
-  // da / gou 暂时只走原始一次性播放；延音参数仍完整保留，可随时重新开启。
+  // 前两个音节只走原始一次性播放；第三音节可进入延音纹理。
   if (!sustain) {
     const source = ctx.createBufferSource();
+    const gain = ctx.createGain();
     source.buffer = sourceBuffer;
     source.playbackRate.setValueAtTime(rate, when);
-    source.connect(sfxBus);
+    gain.gain.setValueAtTime(sampleGain, when);
+    source.connect(gain);
+    gain.connect(sfxBus);
+    source.onended = () => {
+      try { source.disconnect(); } catch (_) { /* 节点可能已断开 */ }
+      try { gain.disconnect(); } catch (_) { /* 节点可能已断开 */ }
+    };
     source.start(when);
     return null;
   }
@@ -881,7 +1518,7 @@ function playPressVoice(name, rate, when) {
   const dryGain = ctx.createGain();
   drySource.buffer = sourceBuffer;
   drySource.playbackRate.setValueAtTime(rate, when);
-  dryGain.gain.setValueAtTime(1, when);
+  dryGain.gain.setValueAtTime(sampleGain, when);
   dryGain.gain.setValueAtTime(0, handoffAt);
   drySource.connect(dryGain);
   dryGain.connect(sfxBus);
@@ -892,7 +1529,7 @@ function playPressVoice(name, rate, when) {
   loopSource.buffer = sustain.buffer;
   loopSource.loop = true;
   loopSource.playbackRate.setValueAtTime(rate, handoffAt);
-  loopGain.gain.setValueAtTime(1, handoffAt);
+  loopGain.gain.setValueAtTime(sampleGain, handoffAt);
   loopSource.connect(loopGain);
   loopGain.connect(sfxBus);
 
@@ -900,6 +1537,7 @@ function playPressVoice(name, rate, when) {
     id: ++voiceSerial,
     name,
     rate,
+    sampleGain,
     when,
     handoffAt,
     visualEndAt: when + 0.28,
@@ -962,7 +1600,11 @@ function textureRateAt(voice, now) {
 function isRetunableSustainVoice(voice) {
   return Boolean(
     voice &&
-    voice.name === 'jiao' &&
+    (
+      voice.name === 'jiao' ||
+      voice.name === 'mi' ||
+      voice.name === 'dingdongji_ji'
+    ) &&
     voice.mode === 'sustain' &&
     voice.held &&
     !voice.released &&
@@ -1062,7 +1704,7 @@ function releaseVoice(voice, musical = true) {
   if (now < voice.handoffAt) {
     voice.mode = 'short';
     voice.dryGain.gain.cancelScheduledValues(now);
-    voice.dryGain.gain.setValueAtTime(1, now);
+    voice.dryGain.gain.setValueAtTime(voice.sampleGain, now);
     safeStop(voice.loopSource, now);
 
     if (mouthVoice === voice) {
@@ -1130,27 +1772,50 @@ function forceStopVoice(voice) {
 function buildGrid() {
   const { width, height } = getStageMetrics();
   const landscape = width >= height;
-  cols = landscape ? 4 : 3;
-  rows = landscape ? 3 : 4;
+  cols = landscape ? (performanceSettings.pianoMode ? 8 : 4) : 3;
+  rows = landscape ? 3 : (performanceSettings.pianoMode ? 8 : 4);
 
   zones = [];
   if (landscape) {
-    // 横屏 3 行 4 列：竖列 = 音节，每列自上而下依次 大 / 狗 / 叫；横列 = 音高（左高右低）
+    // 横屏：纵向依次 da / gou / jiao；钢琴模式横向 do 到高音 do。
     const rowMap = [{ n: 'da', s: '大' }, { n: 'gou', s: '狗' }, { n: 'jiao', s: '叫' }];
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        zones.push({ sample: rowMap[r].n, syllable: rowMap[r].s, pitchTier: c });
+        const pianoKey = performanceSettings.pianoMode ? PIANO_SCALE[c] : null;
+        zones.push({
+          sample: rowMap[r].n,
+          syllable: rowMap[r].s,
+          pitchTier: c,
+          targetMidi: pianoKey?.midi,
+          note: pianoKey?.note,
+          solfege: pianoKey?.solfege,
+        });
       }
     }
   } else {
-    // 竖屏 4 行 3 列：横排 = 音节，每行自左而右依次 大 / 狗 / 叫；纵排 = 音高（上高下低）
+    // 竖屏：横向依次 da / gou / jiao；钢琴模式纵向从高音 do 降到 do。
     const colMap = [{ n: 'da', s: '大' }, { n: 'gou', s: '狗' }, { n: 'jiao', s: '叫' }];
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        zones.push({ sample: colMap[c].n, syllable: colMap[c].s, pitchTier: r });
+        const pianoIndex = performanceSettings.pianoMode
+          ? PIANO_SCALE.length - 1 - r
+          : r;
+        const pianoKey = performanceSettings.pianoMode
+          ? PIANO_SCALE[pianoIndex]
+          : null;
+        zones.push({
+          sample: colMap[c].n,
+          syllable: colMap[c].s,
+          pitchTier: pianoIndex,
+          targetMidi: pianoKey?.midi,
+          note: pianoKey?.note,
+          solfege: pianoKey?.solfege,
+        });
       }
     }
   }
+
+  if (typeof renderKeyGrid === 'function') renderKeyGrid();
 }
 
 function zoneIndex(x, y) {
@@ -1848,6 +2513,12 @@ function flashZone(zi) {
 }
 
 function reflowQueuedInputTimes() {
+  if (!performanceSettings.rhythmSnap) {
+    const now = ctx?.currentTime ?? 0;
+    for (const entry of inputQueue) entry.when = now;
+    return;
+  }
+
   let when = quantize(S8);
   if (Number.isFinite(lastCommittedInputTime)) {
     when = Math.max(when, lastCommittedInputTime + S8);
@@ -1859,6 +2530,8 @@ function reflowQueuedInputTimes() {
 }
 
 function removeQueuedSample(sample) {
+  // 自由节奏下每次输入都必须发声，不能用吸附模式的同音节去重规则。
+  if (!performanceSettings.rhythmSnap) return;
   for (let i = inputQueue.length - 1; i >= 0; i--) {
     const entry = inputQueue[i];
     if (entry.sample !== sample) continue;
@@ -1881,7 +2554,9 @@ function enqueueActivation(zi, pointerId) {
     pointerId,
     zone: zi,
     sample: z.sample,
+    audioSample: resolveSfxSample(z.sample),
     pitchTier: z.pitchTier,
+    targetMidi: z.targetMidi,
     when: 0,
   };
   inputQueue.push(entry);
@@ -1900,7 +2575,9 @@ function enqueueSustainRetune(zi, pointerId, voice) {
     pointerId,
     zone: zi,
     sample: z.sample,
+    audioSample: voice?.name ?? resolveSfxSample(z.sample),
     pitchTier: z.pitchTier,
+    targetMidi: z.targetMidi,
     voice,
     when: 0,
   };
@@ -1908,6 +2585,15 @@ function enqueueSustainRetune(zi, pointerId, voice) {
   reflowQueuedInputTimes();
   flashZone(zi);
   return entry;
+}
+
+function commitUnsnappedInput(entry) {
+  if (performanceSettings.rhythmSnap) return;
+  const queuedIndex = inputQueue.indexOf(entry);
+  if (queuedIndex >= 0) inputQueue.splice(queuedIndex, 1);
+  entry.when = ctx.currentTime;
+  lastCommittedInputTime = entry.when;
+  playQueuedInput(entry);
 }
 
 function scheduleActivationVisual(zi, when) {
@@ -1922,7 +2608,12 @@ function scheduleActivationVisual(zi, when) {
 }
 
 function playQueuedInput(entry) {
-  const rate = barkPlaybackRate(entry.sample, entry.pitchTier);
+  const audioSample = entry.audioSample ?? resolveSfxSample(entry.sample);
+  const rate = barkPlaybackRate(
+    audioSample,
+    entry.pitchTier,
+    entry.targetMidi
+  );
   if (entry.kind === 'sustain-retune') {
     if (retuneSustainVoice(entry.voice, rate, entry.when)) {
       scheduleActivationVisual(entry.zone, entry.when);
@@ -1935,7 +2626,7 @@ function playQueuedInput(entry) {
     state &&
     state.zone === entry.zone &&
     state.pendingEntryId === entry.id;
-  const voice = playPressVoice(entry.sample, rate, entry.when);
+  const voice = playPressVoice(audioSample, rate, entry.when);
 
   if (stillHeld) {
     state.pendingEntryId = null;
@@ -2051,7 +2742,8 @@ function retuneHeldJiao(pointerId, state, zi) {
 
   state.zone = zi;
   state.pendingEntryId = null;
-  enqueueSustainRetune(zi, pointerId, state.voice);
+  const entry = enqueueSustainRetune(zi, pointerId, state.voice);
+  commitUnsnappedInput(entry);
   return true;
 }
 
@@ -2067,6 +2759,7 @@ function enterZone(pointerId, state, zi) {
   state.zone = zi;
   const entry = enqueueActivation(zi, pointerId);
   state.pendingEntryId = entry.id;
+  commitUnsnappedInput(entry);
 }
 
 function tryActivate(pointerId, x, y, state) {
@@ -2078,6 +2771,8 @@ function tryActivate(pointerId, x, y, state) {
       lastX: x,
       lastY: y,
     };
+    // 自由节奏会在 enterZone 内立即播放，先注册状态才能正确接管 jiao 长音。
+    pointers.set(pointerId, state);
     enterZone(pointerId, state, zoneIndex(x, y));
     return state;
   }

@@ -58,6 +58,11 @@ assert.match(
   /entry\.kind === 'sustain-retune'[\s\S]*retuneSustainVoice\(/,
   'a queued sustain event must retune the existing voice',
 );
+assert.match(
+  extractFunction('commitUnsnappedInput'),
+  /entry\.when = ctx\.currentTime[\s\S]*playQueuedInput\(entry\)/,
+  'free rhythm must commit each input immediately at the actual press time',
+);
 for (const name of ['enqueueActivation', 'enqueueSustainRetune']) {
   assert.match(
     extractFunction(name),
@@ -78,12 +83,14 @@ vm.runInNewContext(
   let rows = 3;
   let stageMetrics = { width: 400, height: 300, left: 0, top: 0 };
   function getStageMetrics() { return stageMetrics; }
+  const pointers = new Map();
   ${extractFunction('zoneIndex')}
   ${extractFunction('zonesAlongSegment')}
   let enqueuedZones = [];
   let swipeEntrySerial = 0;
   function retuneHeldJiao() { return false; }
   function releaseVoice() {}
+  function commitUnsnappedInput() {}
   function enqueueActivation(zi) {
     enqueuedZones.push(zi);
     return { id: ++swipeEntrySerial };
@@ -93,6 +100,7 @@ vm.runInNewContext(
 
   const S8 = 0.25;
   const inputQueue = [];
+  const performanceSettings = { rhythmSnap: true };
   let lastCommittedInputTime = -Infinity;
   let quantizedTime = 1;
   function quantize() { return quantizedTime; }
@@ -147,6 +155,7 @@ vm.runInNewContext(
   let lastCommittedInputTime = -Infinity;
   let inputSerial = 0;
   const inputQueue = [];
+  const performanceSettings = { rhythmSnap: true };
   const pointers = new Map();
   const zones = [
     { sample: 'da', pitchTier: 0 },
@@ -158,6 +167,10 @@ vm.runInNewContext(
   function quantize() { return 1; }
   function hideControlsUntilIdle() {}
   function flashZone() {}
+  function commitUnsnappedInput() {}
+  function resolveSfxSample(sample) {
+    return ({ da: 'ha', gou: 'ji', jiao: 'mi' })[sample] ?? sample;
+  }
   ${extractFunction('reflowQueuedInputTimes')}
   ${extractFunction('removeQueuedSample')}
   ${extractFunction('enqueueActivation')}
@@ -171,6 +184,7 @@ vm.runInNewContext(
   const pressEntries = inputQueue.map(entry => ({
     id: entry.id,
     sample: entry.sample,
+    audioSample: entry.audioSample,
     pitchTier: entry.pitchTier,
     when: entry.when,
   }));
@@ -179,7 +193,7 @@ vm.runInNewContext(
   inputSerial = 0;
   lastCommittedInputTime = -Infinity;
   const voice = {
-    name: 'jiao',
+    name: 'dingdongji_ji',
     mode: 'sustain',
     held: true,
     released: false,
@@ -203,12 +217,52 @@ vm.runInNewContext(
   sustainQueueSandbox,
 );
 
+const freeRhythmSandbox = {};
+vm.runInNewContext(
+  `
+  const performanceSettings = { rhythmSnap: false };
+  const inputQueue = [];
+  let lastCommittedInputTime = -Infinity;
+  const ctx = { currentTime: 4.2 };
+  const played = [];
+  function playQueuedInput(entry) { played.push({ ...entry }); }
+  ${extractFunction('removeQueuedSample')}
+  ${extractFunction('commitUnsnappedInput')}
+
+  const first = { id: 1, sample: 'da', when: 0 };
+  const second = { id: 2, sample: 'da', when: 0 };
+  inputQueue.push(first, second);
+  removeQueuedSample('da');
+  commitUnsnappedInput(first);
+  commitUnsnappedInput(second);
+  globalThis.freeRhythmResult = {
+    queueLength: inputQueue.length,
+    played,
+    committedAt: lastCommittedInputTime,
+  };
+  `,
+  freeRhythmSandbox,
+);
+
+assert.deepEqual(
+  JSON.parse(JSON.stringify(freeRhythmSandbox.freeRhythmResult)),
+  {
+    queueLength: 0,
+    played: [
+      { id: 1, sample: 'da', when: 4.2 },
+      { id: 2, sample: 'da', when: 4.2 },
+    ],
+    committedAt: 4.2,
+  },
+  'free rhythm must keep repeated samples and play every input immediately',
+);
+
 assert.deepEqual(
   JSON.parse(JSON.stringify(sustainQueueSandbox.sustainQueueResult)),
   {
     pressEntries: [
-      { id: 2, sample: 'gou', pitchTier: 0, when: 1 },
-      { id: 3, sample: 'da', pitchTier: 1, when: 1.25 },
+      { id: 2, sample: 'gou', audioSample: 'ji', pitchTier: 0, when: 1 },
+      { id: 3, sample: 'da', audioSample: 'ha', pitchTier: 1, when: 1.25 },
     ],
     acceptedFirst: true,
     acceptedSecond: true,
@@ -221,6 +275,7 @@ assert.deepEqual(
       pointerId: 7,
       zone: 2,
       sample: 'jiao',
+      audioSample: 'dingdongji_ji',
       pitchTier: 0,
       voice: true,
       when: 1,
@@ -333,4 +388,5 @@ console.log('Interaction queue verification passed:');
 console.log('- landscape and portrait fast swipes include every crossed zone');
 console.log('- queued hits occupy consecutive eighth-note slots');
 console.log('- da, gou, and jiao each keep only their newest queued item');
-console.log('- held jiao retunes are queued in place and keep release-frame tracking');
+console.log('- held third-syllable voices retune in place and keep release-frame tracking');
+console.log('- free rhythm bypasses quantization and same-sample queue replacement');
