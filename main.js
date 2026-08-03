@@ -19,11 +19,12 @@ const PIANO_OCTAVE_MIN = 3;
 const PIANO_OCTAVE_MAX = 6;
 const PIANO_DEFAULT_OCTAVE_START = 4;
 const DEFAULT_PERFORMANCE_SETTINGS = Object.freeze({
-  pianoMode: false,
+  pianoMode: true,
   octaveSwitching: false,
   pianoOctaveStart: PIANO_DEFAULT_OCTAVE_START,
   rhythmSnap: true,
-  showGrid: false,
+  showGrid: true,
+  zoneColors: true,
 });
 
 /* ---------- 全局状态 ---------- */
@@ -37,8 +38,6 @@ let bgmMuted = false;
 let sfxMuted = false;
 const performanceSettings = { ...DEFAULT_PERFORMANCE_SETTINGS };
 let performanceSettingsSaving = false;
-let pendingPianoOctaveCloudValue = null;
-let pianoOctaveCloudWriteRunning = false;
 
 let startTime = 0;        // 第 0 步对应的 audio 时间
 let nextNoteTime = 0;     // 调度器下一个音符时间
@@ -89,46 +88,26 @@ const sustainLoops = {};  // 从原样本中实时构建的 WSOLA 延音纹理
 let selectedSfxId = 'hajimi';
 let hajimiAnimationEnabled = false;
 let hajimiAnimationReady = false;
+let activeZoneRow = -1;     // 当前按压的行（0=上/蓝, 1=中/绿, 2=下/红），-1=无
 let hajimiAnimationRequested = false;
 let hajimiAnimationFrame = -1;
 let hajimiAnimationEpochBeat = 0;
 
 // 每条纹理由多个波形相似的语音帧重叠生成。帧位置按黄金分割序列变化，
 // 再在目标附近寻找相关度最高的波形，避免固定短片段形成可辨识的循环节。
+function sustainCfg(rS, rE, f, dur) {
+  return { enabled: true, regionStart: rS, regionEnd: rE, frame: f, overlap: f * 0.5, search: 0.004, wrapBlend: f * 0.55, textureDuration: dur, seed: 0.5 };
+}
 const SUSTAIN_REGIONS = {
-  da: {
-    enabled: false,
-    regionStart: 0.065, regionEnd: 0.168,
-    frame: 0.052, overlap: 0.026, search: 0.007,
-    wrapBlend: 0.040, textureDuration: 7.31, seed: 0.17,
-  },
-  gou: {
-    enabled: false,
-    regionStart: 0.055, regionEnd: 0.140,
-    frame: 0.048, overlap: 0.024, search: 0.006,
-    wrapBlend: 0.036, textureDuration: 7.73, seed: 0.43,
-  },
-  jiao: {
-    enabled: true,
-    regionStart: 0.125, regionEnd: 0.290,
-    frame: 0.100, overlap: 0.050, search: 0.012,
-    wrapBlend: 0.040, textureDuration: 12.37, seed: 0.71,
-    preferFrameEntry: true,
-  },
-  mi: {
-    enabled: true,
-    regionStart: 0.245, regionEnd: 0.345,
-    frame: 0.070, overlap: 0.035, search: 0.008,
-    wrapBlend: 0.028, textureDuration: 12.11, seed: 0.29,
-    preferFrameEntry: true,
-  },
-  dingdongji_ji: {
-    enabled: true,
-    regionStart: 0.120, regionEnd: 0.310,
-    frame: 0.100, overlap: 0.050, search: 0.012,
-    wrapBlend: 0.040, textureDuration: 11.83, seed: 0.53,
-    preferFrameEntry: true,
-  },
+  da: sustainCfg(0.045, 0.130, 0.030, 4),
+  gou: sustainCfg(0.040, 0.120, 0.028, 4),
+  jiao: { enabled: true, regionStart: 0.125, regionEnd: 0.290, frame: 0.100, overlap: 0.050, search: 0.012, wrapBlend: 0.040, textureDuration: 12.37, seed: 0.71, preferFrameEntry: true },
+  ha: sustainCfg(0.050, 0.140, 0.030, 4),
+  ji: sustainCfg(0.045, 0.130, 0.028, 4),
+  mi: { enabled: true, regionStart: 0.245, regionEnd: 0.345, frame: 0.070, overlap: 0.035, search: 0.008, wrapBlend: 0.028, textureDuration: 12.11, seed: 0.29, preferFrameEntry: true },
+  dingdongji_ding: sustainCfg(0.045, 0.130, 0.030, 4),
+  dingdongji_dong: sustainCfg(0.040, 0.120, 0.028, 4),
+  dingdongji_ji: { enabled: true, regionStart: 0.120, regionEnd: 0.310, frame: 0.100, overlap: 0.050, search: 0.012, wrapBlend: 0.040, textureDuration: 11.83, seed: 0.53, preferFrameEntry: true },
 };
 const SUSTAIN_CLAIM_LEAD = 0.008; // 提前声明长音，避免多指延音短暂重叠
 const RELEASE_SCHEDULE_LEAD = 0.006;
@@ -162,41 +141,19 @@ let lastCommittedInputTime = -Infinity;
 const pointers = new Map();// pointerId -> { zone, voice, pendingEntryId, lastX, lastY }
 const CONTROLS_IDLE_MS = 2000;
 const CONTROLS_HOVER_IDLE_MS = 250;
-const CREATOR_MID = '357762853';
-const CREATOR_URL = `https://space.bilibili.com/${CREATOR_MID}`;
-const FEATURED_BVID = 'BV1kNKU6REBg';
-const FEATURED_VIDEO_URL = `https://www.bilibili.com/video/${FEATURED_BVID}/`;
-const NAVIGATION_MUTE_KEY = 'dagou-navigation-muted';
-const TOY_CLOUD_KEYS = Object.freeze({
-  sfxUnlocked: 'dagou_sfx_unlocked_v1',
-  settingsSeen: 'dagou_settings_seen_v1',
-  dingdongNewSeen: 'dagou_dingdong_new_seen_v1',
-  hajimiNewSeen: 'dagou_hajimi_new_seen_v1',
-  pianoMode: 'dagou_piano_mode_v1',
-  octaveSwitching: 'dagou_octave_switching_v1',
-  pianoOctaveStart: 'dagou_piano_octave_start_v1',
-  rhythmSnap: 'dagou_rhythm_snap_v1',
-  showGrid: 'dagou_show_grid_v1',
+const CREATOR_URL = 'https://space.bilibili.com/357762853';
+const LS_PREFIX = 'dagou_';
+const LS_KEYS = Object.freeze({
+  sfx: LS_PREFIX + 'sfx',
+  skin: LS_PREFIX + 'skin',
+  pianoMode: LS_PREFIX + 'pianoMode',
+  octaveSwitching: LS_PREFIX + 'octaveSwitching',
+  pianoOctaveStart: LS_PREFIX + 'pianoOctaveStart',
+  rhythmSnap: LS_PREFIX + 'rhythmSnap',
+  showGrid: LS_PREFIX + 'showGrid',
+  zoneColors: LS_PREFIX + 'zoneColors',
 });
-const TOY_CLOUD_KEY_LIST = Object.freeze(Object.values(TOY_CLOUD_KEYS));
-const TOY_REQUIRED_ABILITIES = Object.freeze([
-  'getUserProfile',
-  'getCloudStorage',
-  'setCloudStorage',
-  'navigate',
-]);
-const VIDEO_UNLOCK_ITEM_IDS = new Set(['dingdong', 'hajimi']);
-const LOCKED_SFX_IDS = new Set(['dingdong']);
-const DEBUG_UNLOCK_SFX = false; // 临时调试：发布前改回 false，恢复 Toy 云端锁定。
 let controlsIdleTimer = 0;
-let navigationMuted = false;
-
-try {
-  navigationMuted =
-    window.sessionStorage.getItem(NAVIGATION_MUTE_KEY) === '1';
-} catch (error) {
-  console.warn('[大狗Tap] 无法读取导航临时静音状态。', error);
-}
 
 /* ---------- DOM ---------- */
 const stage     = document.getElementById('stage');
@@ -221,16 +178,10 @@ const topControls = document.getElementById('top-controls');
 const musicToggle = document.getElementById('music-toggle');
 const sfxToggle = document.getElementById('sfx-toggle');
 const settingsButton = document.getElementById('settings-button');
-const updateDot = document.getElementById('update-dot');
+const updateDot = null;
 const settingsOverlay = document.getElementById('settings-overlay');
 const settingsPanel = document.getElementById('settings-panel');
 const settingsClose = document.getElementById('settings-close');
-const unlockConfirmOverlay = document.getElementById('unlock-confirm-overlay');
-const unlockConfirmDialog = document.getElementById('unlock-confirm-dialog');
-const unlockConfirmTitle = document.getElementById('unlock-confirm-title');
-const unlockConfirmMessage = document.getElementById('unlock-confirm-message');
-const unlockConfirmCancel = document.getElementById('unlock-confirm-cancel');
-const unlockConfirmSubmit = document.getElementById('unlock-confirm-submit');
 const authorHomeButton = document.getElementById('author-home-button');
 const videoCard = document.getElementById('video-card');
 const videoPlay = videoCard.querySelector('.video-play');
@@ -250,8 +201,6 @@ const octaveSwitchingSetting = document.getElementById('octave-switching-setting
 const performanceSettingsStatus = document.getElementById(
   'performance-settings-status'
 );
-const toyNotice = document.getElementById('toy-notice');
-const authorLink = document.getElementById('author-link');
 const reduceUiMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 function showControls() {
@@ -282,29 +231,6 @@ function setBusMuted(bus, muted) {
   const now = ctx.currentTime;
   bus.gain.cancelScheduledValues(now);
   bus.gain.setTargetAtTime(muted ? 0 : 1, now, 0.015);
-}
-
-function setNavigationMute(muted) {
-  navigationMuted = muted;
-
-  try {
-    if (muted) {
-      window.sessionStorage.setItem(NAVIGATION_MUTE_KEY, '1');
-    } else {
-      window.sessionStorage.removeItem(NAVIGATION_MUTE_KEY);
-    }
-  } catch (error) {
-    console.warn('[大狗Tap] 无法保存导航临时静音状态。', error);
-  }
-
-  if (!ctx || !master) return;
-  const now = ctx.currentTime;
-  master.gain.cancelScheduledValues(now);
-  master.gain.setTargetAtTime(muted ? 0 : MASTER_GAIN, now, 0.015);
-}
-
-function restoreAfterNavigation() {
-  if (navigationMuted) setNavigationMute(false);
 }
 
 function updateMuteButton(button, muted, label) {
@@ -340,45 +266,14 @@ function setRhythmScale(element, pulse, amount) {
   );
 }
 
-/* 两行文字拆成等距字符；Created by 整体跟拍，
-   MarkCup 每拍只放大一个字母，并按 M → a → … → p 循环。 */
-const authorNameLetters = [];
-for (const line of authorLink.querySelectorAll('.author-label, .author-name')) {
-  const text = line.textContent;
-  line.textContent = '';
-  for (const char of text) {
-    const letter = document.createElement('span');
-    letter.className = 'author-letter';
-    letter.textContent = char === ' ' ? ' ' : char;   // 空格转为 nbsp，避免 inline-block 中塌陷
-    line.appendChild(letter);
-    if (line.classList.contains('author-name')) {
-      authorNameLetters.push(letter);
-    }
-  }
-}
 
-function updateAuthorNameLetters(beatIndex, pulse) {
-  const activeIndex = authorNameLetters.length
-    ? ((beatIndex % authorNameLetters.length) + authorNameLetters.length) %
-      authorNameLetters.length
-    : -1;
-
-  for (let i = 0; i < authorNameLetters.length; i++) {
-    const scale = i === activeIndex ? 1 + pulse * 0.24 : 1;
-    authorNameLetters[i].style.transform = `scale(${scale.toFixed(4)})`;
-  }
-}
 
 function updateUiRhythm(beatPosition) {
   if (!Number.isFinite(beatPosition)) {
     setRhythmScale(musicToggle, 0, 0.075);
     setRhythmScale(sfxToggle, 0, 0.075);
     setRhythmScale(settingsButton, 0, 0.075);
-    setRhythmScale(updateDot, 0, 0.4);
     setRhythmScale(videoPlay, 0, 0.12);
-    authorLink.style.setProperty('--author-rhythm-scale', '1');
-    authorLink.style.setProperty('--author-lift', '0px');
-    updateAuthorNameLetters(-1, 0);
     return;
   }
 
@@ -400,109 +295,11 @@ function updateUiRhythm(beatPosition) {
   setRhythmScale(musicToggle, musicPulse, 0.075);
   setRhythmScale(sfxToggle, sfxPulse, 0.075);
   setRhythmScale(settingsButton, pulse, 0.075);
-  setRhythmScale(updateDot, pulse, 0.4);
   setRhythmScale(videoPlay, pulse, 0.12);
-  authorLink.style.setProperty(
-    '--author-rhythm-scale',
-    (1 + pulse * 0.032).toFixed(4)
-  );
-  authorLink.style.setProperty(
-    '--author-lift',
-    `${(-pulse * 1.4).toFixed(3)}px`
-  );
-  updateAuthorNameLetters(beatIndex, pulse);
-}
-
-async function navigateWithToy(type, id, fallbackUrl, label) {
-  try {
-    if (window.toy && typeof window.toy.navigate === 'function') {
-      await window.toy.navigate({ type, id });
-      return;
-    }
-  } catch (error) {
-    console.warn(`[大狗Tap] Toy ${label}导航不可用，改用浏览器跳转。`, error);
-  }
-  window.location.assign(fallbackUrl);
 }
 
 function openCreatorSpace() {
-  setNavigationMute(true);
-  return navigateWithToy('space', CREATOR_MID, CREATOR_URL, '主页');
-}
-
-let videoUnlockPending = false;
-
-async function openFeaturedVideo(options) {
-  const optimisticUnlock = options?.optimisticUnlock === true;
-  const delayAfterCloudWriteMs = Number.isFinite(options?.delayAfterCloudWriteMs)
-    ? Math.max(0, options.delayAfterCloudWriteMs)
-    : 0;
-  if (videoUnlockPending) return;
-  videoUnlockPending = true;
-  videoCard.setAttribute('aria-busy', 'true');
-
-  try {
-    const state = await toyStateReady;
-    if (!state.environmentAvailable || !state.toy) {
-      setNavigationMute(true);
-      window.location.assign(FEATURED_VIDEO_URL);
-      return;
-    }
-
-    const wasUnlocked = state.sfxUnlocked;
-    if (optimisticUnlock && !wasUnlocked) {
-      state.sfxUnlocked = true;
-      renderToyCloudState();
-    }
-    if (optimisticUnlock && !state.cloudReadable) {
-      showToyNotice(
-        '解锁失败，请确认已登录哔哩哔哩后刷新重试。多次失败建议更新APP。',
-        true
-      );
-      return;
-    }
-
-    let unlockedNow = false;
-    if (state.cloudReadable && !wasUnlocked) {
-      try {
-        await state.toy.setCloudStorage({
-          [TOY_CLOUD_KEYS.sfxUnlocked]: '1',
-        });
-      } catch (error) {
-        markToyCloudUnavailable(state);
-        console.warn('[大狗Tap] 音效解锁状态写入失败。', error);
-        showToyNotice(
-          '解锁失败，请确认已登录哔哩哔哩后刷新重试。多次失败建议更新APP。',
-          true
-        );
-        return;
-      }
-
-      state.sfxUnlocked = true;
-      unlockedNow = true;
-      renderToyCloudState();
-      if (delayAfterCloudWriteMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, delayAfterCloudWriteMs));
-      }
-    }
-
-    try {
-      setNavigationMute(true);
-      await state.toy.navigate({ type: 'video', id: FEATURED_BVID });
-    } catch (error) {
-      setNavigationMute(false);
-      console.warn('[大狗Tap] Toy 视频导航失败。', error);
-      showToyNotice(
-        unlockedNow
-          ? '已完成解锁，但视频打开失败，请稍后重试。多次失败建议更新APP。'
-          : '视频打开失败，请稍后重试。多次失败建议更新APP。',
-        true
-      );
-    }
-  } finally {
-    videoUnlockPending = false;
-    videoCard.removeAttribute('aria-busy');
-  }
+  window.open(CREATOR_URL, '_blank');
 }
 
 for (const button of topControls.querySelectorAll('button')) {
@@ -511,8 +308,7 @@ for (const button of topControls.querySelectorAll('button')) {
   });
   button.addEventListener('click', (event) => {
     const pinnedSettingsButton =
-      button === settingsButton &&
-      topControls.classList.contains('has-update-dot');
+      button === settingsButton;
     if (!topControls.classList.contains('is-visible') && !pinnedSettingsButton) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -527,46 +323,8 @@ for (const button of topControls.querySelectorAll('button')) {
 musicToggle.addEventListener('click', toggleMusic);
 sfxToggle.addEventListener('click', toggleSoundEffects);
 
-/* ---------- 设置菜单与 Toy 云状态 ---------- */
+/* ---------- 设置菜单与本地存储 ---------- */
 let settingsOpen = false;
-let unlockConfirmOpen = false;
-let unlockConfirmTrigger = null;
-let toyNoticeTimer = 0;
-const toyCloudState = {
-  toy: null,
-  initialized: false,
-  environmentAvailable: false,
-  cloudReadable: false,
-  sfxUnlocked: DEBUG_UNLOCK_SFX,
-  settingsSeen: false,
-  newSeen: {
-    dingdong: false,
-    hajimi: false,
-  },
-  locallyChanged: {
-    settingsSeen: false,
-    dingdong: false,
-    hajimi: false,
-  },
-};
-const PERFORMANCE_SETTING_KEYS = Object.freeze({
-  pianoMode: TOY_CLOUD_KEYS.pianoMode,
-  octaveSwitching: TOY_CLOUD_KEYS.octaveSwitching,
-  rhythmSnap: TOY_CLOUD_KEYS.rhythmSnap,
-  showGrid: TOY_CLOUD_KEYS.showGrid,
-});
-
-function showToyNotice(message, isError = false) {
-  clearTimeout(toyNoticeTimer);
-  toyNotice.textContent = message;
-  toyNotice.classList.toggle('is-error', isError);
-  toyNotice.classList.add('is-visible');
-  toyNotice.setAttribute('aria-hidden', 'false');
-  toyNoticeTimer = setTimeout(() => {
-    toyNotice.classList.remove('is-visible');
-    toyNotice.setAttribute('aria-hidden', 'true');
-  }, 4800);
-}
 
 function clearQueuedPerformanceInput() {
   inputQueue.length = 0;
@@ -692,7 +450,7 @@ function applyPerformanceSettings(previousSettings) {
 
 function replacePerformanceSettings(nextSettings) {
   const previousSettings = { ...performanceSettings };
-  for (const key of Object.keys(PERFORMANCE_SETTING_KEYS)) {
+  for (const key of Object.keys(DEFAULT_PERFORMANCE_SETTINGS)) {
     performanceSettings[key] = nextSettings[key] === true;
   }
   performanceSettings.pianoOctaveStart = normalizePianoOctaveStart(
@@ -705,34 +463,33 @@ function resetPerformanceSettingsToDefaults() {
   replacePerformanceSettings(DEFAULT_PERFORMANCE_SETTINGS);
 }
 
-function markToyCloudUnavailable(state = toyCloudState) {
-  state.cloudReadable = false;
-  renderToyCloudState();
+function saveLocalSettings() {
+  try {
+    localStorage.setItem(LS_KEYS.sfx, selectedSfxId);
+    localStorage.setItem(LS_KEYS.skin, hajimiAnimationEnabled ? 'emperor' : 'classic');
+    for (const [key, val] of Object.entries(performanceSettings)) {
+      const lsKey = LS_KEYS[key];
+      if (lsKey) localStorage.setItem(lsKey, JSON.stringify(val));
+    }
+  } catch (_) {}
 }
 
-function readCloudPerformanceSettings(cloud) {
-  const settings = { ...DEFAULT_PERFORMANCE_SETTINGS };
-  for (const [settingName, cloudKey] of Object.entries(PERFORMANCE_SETTING_KEYS)) {
-    const value = cloud[cloudKey];
-    if (value === '1') settings[settingName] = true;
-    else if (value === '0') settings[settingName] = false;
-  }
-  const cloudOctaveStart = Number(cloud[TOY_CLOUD_KEYS.pianoOctaveStart]);
-  const validCloudOctaveStart = Number.isInteger(cloudOctaveStart) &&
-    cloudOctaveStart >= PIANO_OCTAVE_MIN &&
-    cloudOctaveStart <= PIANO_OCTAVE_MAX;
-  settings.pianoOctaveStart = validCloudOctaveStart
-    ? cloudOctaveStart
-    : PIANO_DEFAULT_OCTAVE_START;
-  if (!validCloudOctaveStart) settings.octaveSwitching = false;
-  return settings;
+function loadLocalSettings() {
+  try {
+    const savedSfx = localStorage.getItem(LS_KEYS.sfx);
+    if (savedSfx && SFX_SAMPLE_SETS[savedSfx]) selectedSfxId = savedSfx;
+    const savedSkin = localStorage.getItem(LS_KEYS.skin);
+    if (savedSkin === 'emperor') hajimiAnimationEnabled = true;
+    for (const [key] of Object.entries(DEFAULT_PERFORMANCE_SETTINGS)) {
+      const lsKey = LS_KEYS[key];
+      if (!lsKey) continue;
+      const val = localStorage.getItem(lsKey);
+      if (val !== null) performanceSettings[key] = JSON.parse(val);
+    }
+  } catch (_) {}
 }
 
 function renderPerformanceSettings() {
-  const cloudAvailable =
-    toyCloudState.initialized &&
-    toyCloudState.environmentAvailable &&
-    toyCloudState.cloudReadable;
   octaveSwitchingSetting.hidden = !performanceSettings.pianoMode;
 
   for (const button of performanceSettingButtons) {
@@ -741,254 +498,18 @@ function renderPerformanceSettings() {
       'aria-checked',
       String(performanceSettings[settingName] === true)
     );
-    button.disabled = !toyCloudState.initialized || performanceSettingsSaving;
+    button.disabled = false;
   }
 
-  performanceSettingsStatus.classList.toggle(
-    'is-error',
-    toyCloudState.initialized && !cloudAvailable
-  );
-  if (performanceSettingsSaving) {
-    performanceSettingsStatus.textContent = '正在保存到哔哩哔哩云端…';
-  } else if (!toyCloudState.initialized) {
-    performanceSettingsStatus.textContent = '正在读取哔哩哔哩云端设置…';
-  } else if (cloudAvailable) {
-    performanceSettingsStatus.textContent = '设置已通过哔哩哔哩云端同步';
-  } else {
-    performanceSettingsStatus.textContent = '云存储不可用，本次设置仅在当前页面有效';
-  }
+  performanceSettingsStatus.textContent = '设置已保存到本地';
   renderOctaveControls();
 }
 
-function renderToyCloudState() {
-  const showUpdateDot = !toyCloudState.settingsSeen;
-  updateDot.classList.toggle('is-hidden', !showUpdateDot);
-  topControls.classList.toggle('has-update-dot', showUpdateDot);
-
-  for (const option of sfxOptions) {
-    const sfxId = option.dataset.sfx;
-    const isCloudLockedOption = LOCKED_SFX_IDS.has(sfxId);
-    const locked = isCloudLockedOption && !toyCloudState.sfxUnlocked;
-    option.classList.toggle('is-locked', locked);
-
-    if (VIDEO_UNLOCK_ITEM_IDS.has(sfxId)) {
-      const label = sfxId === 'dingdong' ? '叮咚鸡' : '哈基米';
-      option.setAttribute('aria-label', locked ? `${label}，未解锁` : label);
-      option.classList.toggle('is-new-hidden', toyCloudState.newSeen[sfxId]);
-    }
-  }
-  renderHajimiCharacterControl();
-  renderPerformanceSettings();
-}
-
-async function detectToyEnvironment() {
-  const toy = window.toy;
-  if (
-    !toy ||
-    typeof toy.isSupport !== 'function' ||
-    TOY_REQUIRED_ABILITIES.some((ability) => typeof toy[ability] !== 'function')
-  ) {
-    return null;
-  }
-
-  try {
-    const support = await Promise.all(
-      TOY_REQUIRED_ABILITIES.map((ability) => toy.isSupport(ability))
-    );
-    if (support.some((available) => available !== true)) return null;
-
-    const profile = await toy.getUserProfile();
-    const nickname = typeof profile?.nickname === 'string'
-      ? profile.nickname.trim()
-      : '';
-    const avatar = typeof profile?.avatar === 'string'
-      ? profile.avatar.trim()
-      : '';
-    if (!nickname || !avatar) return null;
-
-    return toy;
-  } catch (error) {
-    console.warn('[大狗Tap] Toy 站内环境检测失败。', error);
-    return null;
-  }
-}
-
-async function initializeToyCloudState() {
-  const toy = await detectToyEnvironment();
-  if (!toy) {
-    toyCloudState.initialized = true;
-    resetPerformanceSettingsToDefaults();
-    renderToyCloudState();
-    return toyCloudState;
-  }
-
-  toyCloudState.toy = toy;
-  toyCloudState.environmentAvailable = true;
-
-  try {
-    const cloud = await toy.getCloudStorage(TOY_CLOUD_KEY_LIST);
-    if (!cloud || typeof cloud !== 'object') {
-      throw new Error('Toy 云存储返回值无效');
-    }
-    toyCloudState.cloudReadable = true;
-    toyCloudState.sfxUnlocked =
-      DEBUG_UNLOCK_SFX || cloud[TOY_CLOUD_KEYS.sfxUnlocked] === '1';
-    replacePerformanceSettings(readCloudPerformanceSettings(cloud));
-
-    if (!toyCloudState.locallyChanged.settingsSeen) {
-      toyCloudState.settingsSeen =
-        cloud[TOY_CLOUD_KEYS.settingsSeen] === '1';
-    }
-    if (!toyCloudState.locallyChanged.dingdong) {
-      toyCloudState.newSeen.dingdong =
-        cloud[TOY_CLOUD_KEYS.dingdongNewSeen] === '1';
-    }
-    if (!toyCloudState.locallyChanged.hajimi) {
-      toyCloudState.newSeen.hajimi =
-        cloud[TOY_CLOUD_KEYS.hajimiNewSeen] === '1';
-    }
-  } catch (error) {
-    // 读取不可用时，三个演奏设置也必须整体保持默认值。
-    toyCloudState.cloudReadable = false;
-    resetPerformanceSettingsToDefaults();
-    console.warn('[大狗Tap] Toy 云状态读取失败。', error);
-  }
-
-  toyCloudState.initialized = true;
-  renderToyCloudState();
-  return toyCloudState;
-}
-
-function persistSeenState(items) {
-  void toyStateReady.then(async (state) => {
-    if (!state.environmentAvailable || !state.cloudReadable || !state.toy) return;
-
-    try {
-      await state.toy.setCloudStorage(items);
-    } catch (error) {
-      markToyCloudUnavailable(state);
-      console.warn('[大狗Tap] 提醒状态写入失败。', error);
-      showToyNotice(
-        '状态保存失败，请确认已登录哔哩哔哩后刷新重试。',
-        true
-      );
-    }
-  });
-}
-
-function markSettingsSeen() {
-  if (toyCloudState.settingsSeen) return;
-  toyCloudState.settingsSeen = true;
-  toyCloudState.locallyChanged.settingsSeen = true;
-  renderToyCloudState();
-  persistSeenState({ [TOY_CLOUD_KEYS.settingsSeen]: '1' });
-}
-
-function markSfxNewSeen(sfxId) {
-  if (!VIDEO_UNLOCK_ITEM_IDS.has(sfxId) || toyCloudState.newSeen[sfxId]) return;
-  toyCloudState.newSeen[sfxId] = true;
-  toyCloudState.locallyChanged[sfxId] = true;
-  renderToyCloudState();
-  const key = sfxId === 'dingdong'
-    ? TOY_CLOUD_KEYS.dingdongNewSeen
-    : TOY_CLOUD_KEYS.hajimiNewSeen;
-  persistSeenState({ [key]: '1' });
-}
-
-function markAllSfxNewSeen() {
-  const items = {};
-  for (const sfxId of VIDEO_UNLOCK_ITEM_IDS) {
-    if (toyCloudState.newSeen[sfxId]) continue;
-    toyCloudState.newSeen[sfxId] = true;
-    toyCloudState.locallyChanged[sfxId] = true;
-    const key = sfxId === 'dingdong'
-      ? TOY_CLOUD_KEYS.dingdongNewSeen
-      : TOY_CLOUD_KEYS.hajimiNewSeen;
-    items[key] = '1';
-  }
-
-  if (Object.keys(items).length === 0) return;
-  renderToyCloudState();
-  persistSeenState(items);
-}
-
-async function requireToyCloudContext() {
-  const state = await toyStateReady;
-  if (!state.environmentAvailable || !state.toy) {
-    showToyNotice('请在B站打开此页面或者更新哔哩哔哩手机APP后再解锁', true);
-    return null;
-  }
-  if (!state.cloudReadable) {
-    showToyNotice(
-      '云端状态读取失败，请确认已登录哔哩哔哩后刷新重试。多次失败建议更新APP。',
-      true
-    );
-    return null;
-  }
-  return state;
-}
-
-function openUnlockConfirm(unlockItem, trigger) {
-  if (unlockConfirmOpen || videoUnlockPending) return;
-  const itemLabel = unlockItem === 'emperor'
-    ? '哈基米（帝皇）'
-    : '叮咚鸡';
-  unlockConfirmOpen = true;
-  unlockConfirmTrigger = trigger ?? null;
-  unlockConfirmTitle.textContent = `解锁${itemLabel}`;
-  unlockConfirmMessage.textContent =
-    `${itemLabel}尚未解锁。观看开发视频即可同时解锁叮咚鸡和哈基米（帝皇），是否现在跳转？`;
-  settingsOverlay.inert = true;
-  unlockConfirmOverlay.inert = false;
-  unlockConfirmOverlay.classList.add('is-open');
-  unlockConfirmOverlay.setAttribute('aria-hidden', 'false');
-  unlockConfirmSubmit.focus({ preventScroll: true });
-}
-
-function closeUnlockConfirm(restoreFocus = true) {
-  if (!unlockConfirmOpen || videoUnlockPending) return;
-  const trigger = unlockConfirmTrigger;
-  unlockConfirmOpen = false;
-  unlockConfirmTrigger = null;
-  unlockConfirmOverlay.inert = true;
-  unlockConfirmOverlay.classList.remove('is-open');
-  unlockConfirmOverlay.setAttribute('aria-hidden', 'true');
-  if (settingsOpen) settingsOverlay.inert = false;
-  if (restoreFocus && settingsOpen) {
-    (trigger ?? settingsClose).focus({ preventScroll: true });
-  }
-}
-
-function setUnlockConfirmPending(pending) {
-  unlockConfirmCancel.disabled = pending;
-  unlockConfirmSubmit.disabled = pending;
-  unlockConfirmSubmit.textContent = pending ? '跳转中…' : '前往视频解锁';
-  if (pending) unlockConfirmSubmit.setAttribute('aria-busy', 'true');
-  else unlockConfirmSubmit.removeAttribute('aria-busy');
-}
-
-async function confirmUnlockFromVideo() {
-  if (!unlockConfirmOpen || videoUnlockPending) return;
-  setUnlockConfirmPending(true);
-  try {
-    await openFeaturedVideo({
-      optimisticUnlock: true,
-      delayAfterCloudWriteMs: 500,
-    });
-  } finally {
-    setUnlockConfirmPending(false);
-    closeUnlockConfirm();
-  }
-}
-
-/* 哈基米音效卡本身永不显示锁：皮肤切换收敛到独立的形象切换行，
-   帝皇的锁与 NEW 只挂在帝皇选项上，避免“哈基米被锁”的歧义。 */
 function renderHajimiCharacterControl() {
   const option = sfxOptions.find((item) => item.dataset.sfx === 'hajimi');
   if (!option) return;
 
   const isSelected = selectedSfxId === 'hajimi';
-  const emperorLocked = !toyCloudState.sfxUnlocked;
 
   hajimiSkinSwitcher.classList.toggle('is-open', isSelected);
   hajimiSkinSwitcher.setAttribute('aria-hidden', String(!isSelected));
@@ -1000,13 +521,8 @@ function renderHajimiCharacterControl() {
   hajimiSkinClassic.setAttribute('aria-checked', String(!hajimiAnimationEnabled));
   hajimiSkinEmperor.classList.toggle('is-active', hajimiAnimationEnabled);
   hajimiSkinEmperor.setAttribute('aria-checked', String(hajimiAnimationEnabled));
-  hajimiSkinEmperor.classList.toggle('is-locked', emperorLocked);
-  hajimiSkinEmperor.classList.toggle('is-new-hidden', toyCloudState.newSeen.hajimi);
-  hajimiSkinEmperorHint.textContent = emperorLocked ? '观看开发视频后解锁' : '已解锁';
-  hajimiSkinEmperor.setAttribute(
-    'aria-label',
-    emperorLocked ? '哈基米帝皇形象，观看开发视频后解锁' : '哈基米帝皇形象'
-  );
+  hajimiSkinEmperor.classList.remove('is-locked');
+  hajimiSkinEmperorHint.textContent = '已解锁';
 
   hajimiOptionImage.src = isSelected && hajimiAnimationEnabled
     ? HAJIMI_ANIMATION_ICON_URL
@@ -1050,22 +566,11 @@ function renderHajimiAnimationFrame(beatPosition) {
     (frameIndex % HAJIMI_ATLAS_COLUMNS) * HAJIMI_ATLAS_FRAME_WIDTH;
   const sourceY =
     Math.floor(frameIndex / HAJIMI_ATLAS_COLUMNS) * HAJIMI_ATLAS_FRAME_HEIGHT;
-  dogAnimation2d.clearRect(
-    0,
-    0,
-    HAJIMI_ATLAS_FRAME_WIDTH,
-    HAJIMI_ATLAS_FRAME_HEIGHT
-  );
+  dogAnimation2d.clearRect(0, 0, HAJIMI_ATLAS_FRAME_WIDTH, HAJIMI_ATLAS_FRAME_HEIGHT);
   dogAnimation2d.drawImage(
-    dogAnimationAtlas,
-    sourceX,
-    sourceY,
-    HAJIMI_ATLAS_FRAME_WIDTH,
-    HAJIMI_ATLAS_FRAME_HEIGHT,
-    0,
-    0,
-    HAJIMI_ATLAS_FRAME_WIDTH,
-    HAJIMI_ATLAS_FRAME_HEIGHT
+    dogAnimationAtlas, sourceX, sourceY,
+    HAJIMI_ATLAS_FRAME_WIDTH, HAJIMI_ATLAS_FRAME_HEIGHT,
+    0, 0, HAJIMI_ATLAS_FRAME_WIDTH, HAJIMI_ATLAS_FRAME_HEIGHT
   );
 }
 
@@ -1096,9 +601,9 @@ function setHajimiSkin(useEmperor) {
   if (useEmperor) {
     alignHajimiAnimationToBeat();
     ensureHajimiAnimationLoaded();
-    if (!hajimiAnimationReady) showToyNotice('正在加载东海帝皇动画…');
   }
   applyHajimiAnimationVisibility();
+  saveLocalSettings();
 }
 
 function selectSfxOption(option) {
@@ -1118,54 +623,19 @@ function selectSfxOption(option) {
     other.setAttribute('aria-checked', String(selected));
   }
   applyHajimiAnimationVisibility();
+  saveLocalSettings();
 }
 
-async function handleSfxOptionClick(option) {
-  const sfxId = option.dataset.sfx;
-  const requiresVideoUnlock = LOCKED_SFX_IDS.has(sfxId);
-  if (!requiresVideoUnlock) {
-    selectSfxOption(option);
-    return;
-  }
-
-  markSfxNewSeen(sfxId);
-  if (toyCloudState.sfxUnlocked) {
-    selectSfxOption(option);
-    return;
-  }
-
-  const state = await requireToyCloudContext();
-  if (!state) return;
-  if (!state.sfxUnlocked) {
-    openUnlockConfirm('dingdong', option);
-    return;
-  }
-
+function handleSfxOptionClick(option) {
   selectSfxOption(option);
 }
 
-/* 形象切换行只在选中哈基米时可见可点：原皮随意换回；
-   帝皇未解锁时点击只引导去看开发视频，绝不影响哈基米音效本身。 */
-async function handleSkinOptionClick(button) {
+function handleSkinOptionClick(button) {
   if (selectedSfxId !== 'hajimi') return;
   if (button.dataset.skin !== 'emperor') {
     setHajimiSkin(false);
     return;
   }
-
-  markSfxNewSeen('hajimi');
-  if (toyCloudState.sfxUnlocked) {
-    setHajimiSkin(true);
-    return;
-  }
-
-  const state = await requireToyCloudContext();
-  if (!state) return;
-  if (!state.sfxUnlocked) {
-    openUnlockConfirm('emperor', button);
-    return;
-  }
-
   setHajimiSkin(true);
 }
 
@@ -1173,8 +643,22 @@ function resolveSfxSample(sample, sfxId = selectedSfxId) {
   return SFX_SAMPLE_SETS[sfxId]?.[sample] ?? sample;
 }
 
-renderToyCloudState();
-const toyStateReady = initializeToyCloudState();
+loadLocalSettings();
+// 同步角色选择按钮到已保存的状态
+for (const opt of sfxOptions) {
+  const isSelected = opt.dataset.sfx === selectedSfxId;
+  opt.classList.toggle('is-active', isSelected);
+  opt.setAttribute('aria-checked', String(isSelected));
+  if (isSelected) {
+    const ci = CHARACTER_IMAGE_SETS[selectedSfxId] ?? CHARACTER_IMAGE_SETS.dagou;
+    dogCloseImage.src = ci.close;
+    dogCloseImage.alt = ci.alt;
+    dogOpenImage.src = ci.open;
+    dogInner.classList.toggle('is-hajimi', selectedSfxId === 'hajimi');
+  }
+}
+applyHajimiAnimationVisibility();
+renderPerformanceSettings();
 
 dogAnimationAtlas.addEventListener('load', () => {
   hajimiAnimationReady = true;
@@ -1188,93 +672,23 @@ dogAnimationAtlas.addEventListener('error', () => {
   hajimiAnimationRequested = false;
   dogAnimationAtlas.removeAttribute('src');
   applyHajimiAnimationVisibility();
-  if (wasWaitingForAnimation) {
-    showToyNotice('东海帝皇动画加载失败，请稍后重试。', true);
+    if (wasWaitingForAnimation) {
+    console.warn('[大狗Tap] 东海帝皇动画加载失败。');
   }
 });
 
-async function handlePerformanceSettingClick(button) {
-  if (performanceSettingsSaving) return;
+function handlePerformanceSettingClick(button) {
   const settingName = button.dataset.setting;
-  const cloudKey = PERFORMANCE_SETTING_KEYS[settingName];
-  if (!cloudKey) return;
-
-  const state = await toyStateReady;
   const nextValue = !performanceSettings[settingName];
-  if (!state.environmentAvailable || !state.cloudReadable || !state.toy) {
-    replacePerformanceSettings({
-      ...performanceSettings,
-      [settingName]: nextValue,
-    });
-    renderToyCloudState();
-    showToyNotice('云存储不可用，本次设置仅在当前页面有效。');
-    return;
-  }
-
-  performanceSettingsSaving = true;
+  replacePerformanceSettings({ ...performanceSettings, [settingName]: nextValue });
   renderPerformanceSettings();
-  try {
-    await state.toy.setCloudStorage({
-      [cloudKey]: nextValue ? '1' : '0',
-    });
-    replacePerformanceSettings({
-      ...performanceSettings,
-      [settingName]: nextValue,
-    });
-  } catch (error) {
-    // 写入失败后降级为本地会话设置，保留用户刚刚选择的值。
-    markToyCloudUnavailable(state);
-    replacePerformanceSettings({
-      ...performanceSettings,
-      [settingName]: nextValue,
-    });
-    console.warn('[大狗Tap] 演奏设置写入失败。', error);
-    showToyNotice('云存储不可用，本次设置仅在当前页面有效。');
-  } finally {
-    performanceSettingsSaving = false;
-    renderToyCloudState();
-  }
+  saveLocalSettings();
 }
 
 for (const button of performanceSettingButtons) {
   button.addEventListener('click', () => {
-    void handlePerformanceSettingClick(button);
+    handlePerformanceSettingClick(button);
   });
-}
-
-async function flushPianoOctaveCloudWrite() {
-  const state = await toyStateReady;
-  if (!state.environmentAvailable || !state.cloudReadable || !state.toy) {
-    pendingPianoOctaveCloudValue = null;
-    pianoOctaveCloudWriteRunning = false;
-    return;
-  }
-
-  while (pendingPianoOctaveCloudValue !== null) {
-    const octave = pendingPianoOctaveCloudValue;
-    pendingPianoOctaveCloudValue = null;
-    try {
-      await state.toy.setCloudStorage({
-        [TOY_CLOUD_KEYS.pianoOctaveStart]: String(octave),
-      });
-    } catch (error) {
-      pendingPianoOctaveCloudValue = null;
-      markToyCloudUnavailable(state);
-      console.warn('[大狗Tap] 八度档位写入失败。', error);
-      showToyNotice('云存储不可用，本次八度仅在当前页面有效。');
-      break;
-    }
-  }
-
-  pianoOctaveCloudWriteRunning = false;
-  renderToyCloudState();
-}
-
-function queuePianoOctaveCloudWrite(octave) {
-  pendingPianoOctaveCloudValue = normalizePianoOctaveStart(octave);
-  if (pianoOctaveCloudWriteRunning) return;
-  pianoOctaveCloudWriteRunning = true;
-  void flushPianoOctaveCloudWrite();
 }
 
 function shiftPianoOctave(direction) {
@@ -1291,8 +705,8 @@ function shiftPianoOctave(direction) {
   const previousSettings = { ...performanceSettings };
   performanceSettings.pianoOctaveStart = targetOctave;
   applyPerformanceSettings(previousSettings);
-  renderToyCloudState();
-  queuePianoOctaveCloudWrite(targetOctave);
+  renderPerformanceSettings();
+  saveLocalSettings();
   return true;
 }
 
@@ -1309,7 +723,6 @@ for (const [button, direction] of [
 
 function openSettings() {
   if (settingsOpen) return;
-  markSettingsSeen();
   settingsOpen = true;
   settingsOverlay.inert = false;
   settingsOverlay.classList.add('is-open');
@@ -1319,8 +732,6 @@ function openSettings() {
 
 function closeSettings() {
   if (!settingsOpen) return;
-  if (unlockConfirmOpen) closeUnlockConfirm(false);
-  markAllSfxNewSeen();
   settingsOpen = false;
   settingsOverlay.inert = true;
   settingsOverlay.classList.remove('is-open');
@@ -1335,7 +746,6 @@ function handleAuthorHomeClick() {
 
 settingsButton.addEventListener('click', openSettings);
 settingsClose.addEventListener('click', closeSettings);
-/* 点击面板外的半透明背景关闭；面板上的事件全部拦截，不穿透到游戏区 */
 settingsOverlay.addEventListener('pointerdown', (event) => {
   if (event.target === settingsOverlay) closeSettings();
 });
@@ -1343,35 +753,22 @@ for (const eventName of ['pointerdown', 'pointermove', 'pointerup', 'pointercanc
   settingsOverlay.addEventListener(eventName, (event) => event.stopPropagation());
 }
 settingsPanel.addEventListener('click', (event) => event.stopPropagation());
-unlockConfirmCancel.addEventListener('click', () => closeUnlockConfirm());
-unlockConfirmSubmit.addEventListener('click', () => {
-  void confirmUnlockFromVideo();
-});
-unlockConfirmOverlay.addEventListener('pointerdown', (event) => {
-  if (event.target === unlockConfirmOverlay) closeUnlockConfirm();
-});
-for (const eventName of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
-  unlockConfirmOverlay.addEventListener(eventName, (event) => event.stopPropagation());
-}
-unlockConfirmDialog.addEventListener('click', (event) => event.stopPropagation());
 window.addEventListener('keydown', (event) => {
-  if (event.key !== 'Escape') return;
-  if (unlockConfirmOpen) closeUnlockConfirm();
-  else closeSettings();
+  if (event.key === 'Escape') closeSettings();
 });
 
 authorHomeButton.addEventListener('click', handleAuthorHomeClick);
-videoCard.addEventListener('click', openFeaturedVideo);
+videoCard.addEventListener('click', () => { window.open('https://www.bilibili.com/video/BV1kNKU6REBg', '_blank'); });
 
 /* 三套音效都保留 da / gou / jiao 的语义位置，只替换实际播放采样。 */
 for (const option of sfxOptions) {
   option.addEventListener('click', () => {
-    void handleSfxOptionClick(option);
+    handleSfxOptionClick(option);
   });
 }
 for (const button of hajimiSkinOptions) {
   button.addEventListener('click', () => {
-    void handleSkinOptionClick(button);
+    handleSkinOptionClick(button);
   });
 }
 
@@ -1385,7 +782,7 @@ document.addEventListener(
     ) {
       return;
     }
-    restoreAfterNavigation();
+    /* no-op */
   },
   { capture: true }
 );
@@ -1532,7 +929,7 @@ function initAudio() {
   ctx = new (window.AudioContext || window.webkitAudioContext)();
 
   master = ctx.createGain();
-  master.gain.value = navigationMuted ? 0 : MASTER_GAIN;
+  master.gain.value = MASTER_GAIN;
   bgmBus = ctx.createGain();
   bgmBus.gain.value = bgmMuted ? 0 : 1;
   sfxBus = ctx.createGain();
@@ -1571,7 +968,7 @@ async function loadSamples() {
     }
     buffers[n] = await ctx.decodeAudioData(b64ToArrayBuffer(encoded));
     sustainLoops[n] = SUSTAIN_REGIONS[n]?.enabled
-      ? buildSustainTexture(buffers[n], SUSTAIN_REGIONS[n])
+      ? (() => { try { return buildSustainTexture(buffers[n], SUSTAIN_REGIONS[n]); } catch(_) { return null; } })()
       : null;
   }
 }
@@ -2101,11 +1498,7 @@ function textureRateAt(voice, now) {
 function isRetunableSustainVoice(voice) {
   return Boolean(
     voice &&
-    (
-      voice.name === 'jiao' ||
-      voice.name === 'mi' ||
-      voice.name === 'dingdongji_ji'
-    ) &&
+    !!sustainLoops[voice.name] &&
     voice.mode === 'sustain' &&
     voice.held &&
     !voice.released &&
@@ -3246,8 +2639,18 @@ function tick() {
     `translate(${jx.toFixed(2)}px, ${jy.toFixed(2)}px)` +
     ` rotate(${jr.toFixed(2)}deg) scale(${jellyScale.toFixed(4)})`;
 
-  // 颜色逐渐变红（黄色图 hue-rotate 负角度 → 红，辅以饱和提升）
-  if (holdLevel > 0.004) {
+  // 区域颜色：da=蓝 / gou=绿 / jiao=红
+  if (holdLevel > 0.004 && performanceSettings.zoneColors && activeZoneRow >= 0) {
+    const sampleHues = { da: 160, ha: 160, dingdongji_ding: 160, gou: 80, ji: 80, dingdongji_dong: 80, jiao: -42, mi: -42, dingdongji_ji: -42 };
+    const zi = [...pointers.values()].find(s => s.zone >= 0)?.zone ?? 0;
+    const sample = zones[zi]?.sample;
+    const baseHue = sampleHues[sample] ?? -42;
+    const hue = baseHue * holdLevel;
+    dogJelly.style.filter =
+      `hue-rotate(${hue.toFixed(1)}deg)` +
+      ` saturate(${(1 + 0.7 * holdLevel).toFixed(3)})` +
+      ` brightness(${(1 + 0.04 * holdLevel).toFixed(3)})`;
+  } else if (holdLevel > 0.004) {
     dogJelly.style.filter =
       `hue-rotate(${(-42 * holdLevel).toFixed(1)}deg)` +
       ` saturate(${(1 + 0.7 * holdLevel).toFixed(3)})` +
@@ -3262,11 +2665,33 @@ function tick() {
 /* ============================================================
  * 指针交互：跨格补全 + 节奏队列；jiao 长音在原纹理上直接切换音高
  * ==========================================================*/
-function retuneHeldJiao(pointerId, state, zi) {
+function retuneHeldZone(pointerId, state, zi) {
   const z = zones[zi];
-  if (!z || z.sample !== 'jiao' || !state.voice) return false;
+  if (!z || !state.voice) return false;
   if (!isRetunableSustainVoice(state.voice)) return false;
 
+  // 横向切换（不同音节）：重置计时，释放旧音并启动新音
+  const newAudioSample = resolveSfxSample(z.sample);
+  if (state.voice.name !== newAudioSample) {
+    state.zone = zi;
+    state.pendingEntryId = null;
+    const oldVoice = state.voice;
+    state.voice = null;
+    oldVoice.held = false;
+    oldVoice.released = true;
+    if (activeSustainVoice === oldVoice) activeSustainVoice = null;
+    if (mouthVoice === oldVoice) mouthVoice = null;
+    const now = ctx.currentTime;
+    oldVoice.loopGain.gain.cancelScheduledValues(now);
+    oldVoice.loopGain.gain.setValueAtTime(0, now);
+    oldVoice.dryGain.gain.setValueAtTime(0, now);
+    const entry = enqueueActivation(zi, pointerId);
+    state.pendingEntryId = entry.id;
+    commitUnsnappedInput(entry);
+    return true;
+  }
+
+  // 纵向切换（同音节）：延音变速
   state.zone = zi;
   state.pendingEntryId = null;
   const entry = enqueueSustainRetune(zi, pointerId, state.voice);
@@ -3276,7 +2701,8 @@ function retuneHeldJiao(pointerId, state, zi) {
 
 function enterZone(pointerId, state, zi) {
   if (zi === state.zone) return;
-  if (retuneHeldJiao(pointerId, state, zi)) return;
+  activeZoneRow = Math.floor(zi / cols);
+  if (retuneHeldZone(pointerId, state, zi)) return;
 
   if (state.voice) {
     releaseVoice(state.voice, true);
@@ -3359,7 +2785,7 @@ function endInput(inputId, musical) {
   }
   if (!musical) cancelQueuedInputs(inputId);
   pointers.delete(inputId);
-  if (pointers.size === 0) hideControlsUntilIdle();
+  if (pointers.size === 0) { hideControlsUntilIdle(); activeZoneRow = -1; }
 }
 
 function endPointer(e, musical) {
@@ -3378,8 +2804,7 @@ function handlePianoKeyDown(event) {
     event.ctrlKey ||
     event.altKey ||
     event.metaKey ||
-    settingsOpen ||
-    unlockConfirmOpen
+    settingsOpen
   ) return;
 
   if (event.code === 'ArrowLeft' || event.code === 'ArrowRight') {
@@ -3428,13 +2853,14 @@ window.addEventListener('contextmenu', (e) => e.preventDefault());
  * 启动
  * ==========================================================*/
 async function start() {
+  try {
   if (started) return;
   started = true;
   hideControlsUntilIdle();
   subEl.textContent = '狗 叫 加 载 中 …';
 
   initAudio();
-  if (ctx.state === 'suspended') await ctx.resume();
+  try { if (ctx.state === 'suspended') await ctx.resume(); } catch (_) {}
   await loadSamples();
 
   startTime = ctx.currentTime + 0.12;
@@ -3445,6 +2871,7 @@ async function start() {
   setInterval(scheduler, 25);
 
   overlay.classList.add('hide');
+} catch(e) { console.warn('start error:', e); overlay.classList.add('hide'); }
 }
 
 let resizeTimer = 0;
@@ -3465,3 +2892,756 @@ updateMuteButton(musicToggle, bgmMuted, '音乐');
 updateMuteButton(sfxToggle, sfxMuted, '音效');
 showControls();
 requestAnimationFrame(tick);
+
+/* ============================================================
+ * MIDI 演奏模块
+ * ==========================================================*/
+const midiButton = document.getElementById('midi-button');
+const midiOverlay = document.getElementById('midi-overlay');
+const midiPanel = document.getElementById('midi-panel');
+const midiClose = document.getElementById('midi-close');
+const midiFileButton = document.getElementById('midi-file-button');
+const midiFileInput = document.getElementById('midi-file-input');
+const midiFileInfo = document.getElementById('midi-file-info');
+const voiceLoopButton = document.getElementById('voice-loop-button');
+const voiceLoopStatus = document.getElementById('voice-loop-status');
+const midiTracks = document.getElementById('midi-tracks');
+const midiPlayBtn = document.getElementById('midi-play-btn');
+const midiStopBtn = document.getElementById('midi-stop-btn');
+const midiProgressBar = document.getElementById('midi-progress-bar');
+const midiTime = document.getElementById('midi-time');
+
+let midiData = null;
+let midiPlayState = 'stopped'; // stopped | playing
+let midiTimer = 0;
+let midiVoices = [];
+let midiStartAt = 0;
+let midiDuration = 0;
+let midiNoteIndex = 0;
+let midiPausedAt = 0;
+let voiceLoopEnabled = false;
+let voiceLoopStream = null;
+let voiceLoopContext = null;
+let voiceLoopAnalyser = null;
+let voiceLoopFrame = 0;
+let voiceLoopRecorder = null;
+let voiceLoopChunks = [];
+let voiceLoopState = 'off'; // off | waiting | recording | playing
+let voiceLoopNoiseFloor = 0.008;
+let voiceLoopLastVoiceAt = 0;
+let voiceLoopUtteranceStartedAt = 0;
+let voiceLoopMutedMusic = false;
+let voiceLoopGeneration = 0;
+const VOICE_LOOP_SILENCE_MS = 1200;
+const VOICE_LOOP_MAX_UTTERANCE_MS = 20000;
+
+function formatTime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function sampleForTrack(trackIdx, totalTracks, scheme = 'alternate') {
+  const samples = ['da', 'gou', 'jiao'];
+  if (scheme === 'alternate') return samples[trackIdx % 3];
+  if (scheme === 'bypitch') return 'jiao'; // 先简化，后面可以细化
+  return samples[Math.min(trackIdx, 2)];
+}
+
+function noteToPlaybackRate(midiNote) {
+  if (!zones.length) return 1;
+  const pianoScale = buildPianoScale(effectivePianoOctaveStart());
+  let best = { index: -1, diff: Infinity };
+  for (let i = 0; i < pianoScale.length; i++) {
+    const diff = Math.abs(midiNote - pianoScale[i].midi);
+    if (diff < best.diff) { best = { index: i, diff }; }
+  }
+  const target = pianoScale[best.index];
+  if (!target) return 1;
+  return 440 * Math.pow(2, (midiNote - 69) / 12) / (440 * Math.pow(2, (target.midi - 69) / 12));
+}
+
+function findZoneForMidiNote(midiNote, sample) {
+  for (let i = 0; i < zones.length; i++) {
+    const z = zones[i];
+    if (z.sample !== sample) continue;
+    if (z.targetMidi !== undefined && Math.abs(z.targetMidi - midiNote) < 0.5) return i;
+  }
+  for (let i = 0; i < zones.length; i++) {
+    if (zones[i].sample === sample) return i;
+  }
+  return 0;
+}
+
+function midiPlayNote(midiNote, startTime, duration, ch, chOrder) {
+  if (!started) return;
+  const idx = chOrder.indexOf(ch);
+  const sample = idx >= 0 ? sampleForTrack(idx, chOrder.length) : 'jiao';
+  const zi = findZoneForMidiNote(midiNote, sample);
+  const z = zones[zi];
+  if (!z) return;
+  const rate = noteToPlaybackRate(midiNote);
+  const when = Math.max(ctx.currentTime, startTime);
+  const audioSample = resolveSfxSample(z.sample);
+  const voice = playPressVoice(audioSample, rate, when);
+  if (voice) {
+    voice.midiNote = midiNote;
+    voice.midiEndAt = when + duration;
+    voice.midiZone = zi;
+    midiVoices.push(voice);
+    scheduleActivationVisual(zi, when);
+  }
+}
+
+function midiReleaseNote(voice, when) {
+  if (!voice || voice.released) return;
+  releaseVoice(voice, true);
+}
+
+function midiStopAllVoices() {
+  for (const v of midiVoices) {
+    if (!v.released && !v.cleaned) forceStopVoice(v);
+  }
+  midiVoices = [];
+}
+
+function midiSchedulePlayback() {
+  if (!midiData || midiPlayState === 'playing') return;
+  const audioNotes = Array.isArray(midiData._audioNotes)
+    ? midiData._audioNotes
+    : null;
+  const tracks = audioNotes
+    ? []
+    : midiData.track.filter(t => t.event && t.event.length);
+  if (!audioNotes && !tracks.length) return;
+  const ppq = midiData.timeDivision || 480;
+  let tempoUs = 500000;
+  const skipDrumsEl = document.getElementById('midi-skip-drums');
+  const skipDrums = skipDrumsEl && skipDrumsEl.checked;
+  // 读取已勾选的通道
+  const chCbs = document.querySelectorAll('.midi-ch-cb');
+  const enabledChs = new Set();
+  if (chCbs.length === 0) {
+    // 没有复选框（内置歌曲）→ 全部允许
+  } else {
+    for (const cb of chCbs) {
+      if (cb.checked) enabledChs.add(cb.dataset.ch);
+    }
+  }
+  let allNotes;
+  let chOrder;
+  if (audioNotes) {
+    allNotes = audioNotes.map(note => ({ ...note }));
+    chOrder = ['0', '1', '2'];
+  } else {
+    // 读取 tempo
+    for (const t of tracks) {
+      for (const ev of t.event) {
+        if (ev.type === 0xFF && ev.metaType === 0x51 && typeof ev.data === 'number') tempoUs = ev.data;
+      }
+    }
+    const spq = tempoUs / 1000000;
+    const rawNotes = [];
+    for (const t of tracks) {
+      let absTicks = 0;
+      for (const ev of t.event) {
+        absTicks += ev.deltaTime;
+        const ch = String(ev.channel ?? 0);
+        if (enabledChs.size > 0 && !enabledChs.has(ch)) continue;
+        if (skipDrums && (ch === '9' || ch === '10')) continue;
+        if (ev.type === 9 && ev.data && ev.data[1] > 0) {
+          rawNotes.push({ midiNote: ev.data[0], ticks: absTicks, velocity: ev.data[1], ch, isNoteOn: true });
+        } else if (ev.type === 8 || (ev.type === 9 && ev.data && ev.data[1] === 0)) {
+          rawNotes.push({ midiNote: ev.data[0], ticks: absTicks, ch, isNoteOn: false });
+        }
+      }
+    }
+    // 配对
+    const noteMap = {};
+    allNotes = [];
+    chOrder = (midiData._sortedChs || []).filter(c => rawNotes.some(n => n.ch === c));
+    for (const n of rawNotes) {
+      const key = n.midiNote + '-' + n.ch;
+      if (n.isNoteOn) {
+        noteMap[key] = n;
+      } else if (noteMap[key] !== undefined) {
+        const noteOn = noteMap[key];
+        allNotes.push({
+          midiNote: n.midiNote,
+          startTime: noteOn.ticks * spq / ppq,
+          duration: Math.max(0.08, (n.ticks - noteOn.ticks) * spq / ppq),
+          velocity: noteOn.velocity || 100,
+          ch: n.ch,
+        });
+        delete noteMap[key];
+      }
+    }
+    for (const key in noteMap) {
+      const n = noteMap[key];
+      allNotes.push({
+        midiNote: n.midiNote,
+        startTime: n.ticks * spq / ppq,
+        duration: 0.5,
+        velocity: n.velocity,
+        ch: n.ch,
+      });
+    }
+  }
+  allNotes.sort((a, b) => a.startTime - b.startTime);
+  if (!allNotes.length) { midiFileInfo.textContent = '没有找到可演奏的音符'; return; }
+  // 去掉开头空白
+  const firstNoteTime = allNotes[0].startTime;
+  if (firstNoteTime > 0.5) {
+    for (const n of allNotes) n.startTime -= firstNoteTime;
+  }
+  midiDuration = allNotes[allNotes.length - 1].startTime + allNotes[allNotes.length - 1].duration + 1;
+  midiNoteIndex = 0;
+  midiStartAt = ctx.currentTime;
+  midiPlayState = 'playing';
+  midiPlayBtn.textContent = '⏸ 暂停';
+  midiVoices = [];
+  clearInterval(midiTimer);
+  midiTimer = setInterval(() => {
+    if (midiPlayState !== 'playing') return;
+    const now = ctx.currentTime;
+    const elapsed = now - midiStartAt;
+    // 调度未来 150ms 的音符
+    while (midiNoteIndex < allNotes.length && allNotes[midiNoteIndex].startTime < elapsed + 0.15) {
+      const n = allNotes[midiNoteIndex];
+      midiPlayNote(n.midiNote, midiStartAt + n.startTime, n.duration, n.ch, chOrder);
+      midiNoteIndex++;
+    }
+    // 释放已过期的音符
+    midiVoices = midiVoices.filter(v => {
+      if (v.midiEndAt && v.midiEndAt <= now && !v.released) {
+        midiReleaseNote(v, now);
+        return false;
+      }
+      return !v.released && !v.cleaned;
+    });
+    // 更新进度
+    const pct = Math.min(100, (elapsed / midiDuration) * 100);
+    midiProgressBar.style.width = pct + '%';
+    midiTime.textContent = `${formatTime(elapsed)} / ${formatTime(midiDuration)}`;
+    if (pct >= 100) {
+      const finishedVoiceLoop = voiceLoopEnabled && voiceLoopState === 'playing';
+      midiStopPlayback();
+      if (finishedVoiceLoop) {
+        voiceLoopState = 'waiting';
+        voiceLoopNoiseFloor = 0.008;
+        voiceLoopStatus.textContent = '唱完了，正在听下一句';
+        restoreVoiceLoopMusic();
+      } else if (bgmMuted) {
+        toggleMusic();
+      }
+    }
+  }, 25);
+}
+
+function midiStopPlayback() {
+  midiPlayState = 'stopped';
+  clearInterval(midiTimer);
+  midiStopAllVoices();
+  midiProgressBar.style.width = '0%';
+  midiTime.textContent = '0:00 / 0:00';
+  midiPlayBtn.textContent = '▶ 播放';
+  midiPlayBtn.disabled = !midiData;
+}
+
+function getVoiceLoopMimeType() {
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/ogg;codecs=opus',
+    'audio/mp4',
+    'audio/webm',
+  ];
+  return candidates.find(type => MediaRecorder.isTypeSupported(type)) || '';
+}
+
+function setVoiceLoopButton(enabled, status) {
+  voiceLoopEnabled = enabled;
+  voiceLoopButton.setAttribute('aria-checked', String(enabled));
+  voiceLoopButton.setAttribute('aria-label', enabled ? '关闭自动复读' : '开启自动复读');
+  voiceLoopButton.classList.toggle('is-listening', enabled);
+  voiceLoopStatus.textContent = status;
+}
+
+function muteMusicForVoiceLoop() {
+  if (!bgmMuted) {
+    toggleMusic();
+    voiceLoopMutedMusic = true;
+  }
+}
+
+function restoreVoiceLoopMusic() {
+  if (voiceLoopMutedMusic && bgmMuted) toggleMusic();
+  voiceLoopMutedMusic = false;
+}
+
+async function stopVoiceLoop() {
+  const wasSinging = voiceLoopState === 'playing';
+  voiceLoopGeneration++;
+  voiceLoopState = 'off';
+  cancelAnimationFrame(voiceLoopFrame);
+  voiceLoopFrame = 0;
+  if (voiceLoopRecorder && voiceLoopRecorder.state !== 'inactive') {
+    voiceLoopRecorder.stop();
+  }
+  voiceLoopRecorder = null;
+  voiceLoopChunks = [];
+  if (midiPlayState === 'playing' && wasSinging) midiStopPlayback();
+  if (voiceLoopStream) {
+    for (const track of voiceLoopStream.getTracks()) track.stop();
+  }
+  voiceLoopStream = null;
+  voiceLoopAnalyser = null;
+  if (voiceLoopContext) await voiceLoopContext.close().catch(() => {});
+  voiceLoopContext = null;
+  restoreVoiceLoopMusic();
+  setVoiceLoopButton(false, '自动复读已关闭');
+}
+
+async function singVoiceLoopUtterance(blob, generation) {
+  if (!voiceLoopEnabled || generation !== voiceLoopGeneration || !blob.size) {
+    voiceLoopState = voiceLoopEnabled ? 'waiting' : 'off';
+    restoreVoiceLoopMusic();
+    return;
+  }
+  voiceLoopState = 'analyzing';
+  voiceLoopStatus.textContent = '正在识别音高和节奏';
+  try {
+    const recordedType = blob.type || 'audio/webm';
+    const extension = recordedType.includes('ogg')
+      ? 'ogg'
+      : recordedType.includes('mp4')
+        ? 'm4a'
+        : 'webm';
+    const file = new File([blob], `自动复读.${extension}`, { type: recordedType });
+    midiFileInfo.style.display = 'block';
+    await configureAudioFile(file, await blob.arrayBuffer());
+    if (!voiceLoopEnabled || generation !== voiceLoopGeneration) return;
+    midiPlayBtn.disabled = false;
+    midiStopBtn.disabled = false;
+    if (ctx?.state === 'suspended') await ctx.resume();
+    voiceLoopState = 'playing';
+    voiceLoopStatus.textContent = '大狗正在按你的音高唱出来';
+    midiSchedulePlayback();
+  } catch (error) {
+    if (!voiceLoopEnabled || generation !== voiceLoopGeneration) return;
+    midiData = null;
+    midiPlayBtn.disabled = true;
+    voiceLoopState = 'waiting';
+    voiceLoopNoiseFloor = 0.008;
+    voiceLoopStatus.textContent = `没有识别到稳定音高，继续听下一句`;
+    restoreVoiceLoopMusic();
+  }
+}
+
+function startVoiceLoopUtterance(generation) {
+  if (!voiceLoopStream || voiceLoopState !== 'waiting') return;
+  const mimeType = getVoiceLoopMimeType();
+  voiceLoopChunks = [];
+  voiceLoopRecorder = mimeType
+    ? new MediaRecorder(voiceLoopStream, { mimeType })
+    : new MediaRecorder(voiceLoopStream);
+  voiceLoopRecorder.addEventListener('dataavailable', event => {
+    if (event.data.size) voiceLoopChunks.push(event.data);
+  });
+  voiceLoopRecorder.addEventListener('stop', () => {
+    const blob = new Blob(voiceLoopChunks, {
+      type: voiceLoopRecorder?.mimeType || mimeType || 'audio/webm',
+    });
+    voiceLoopRecorder = null;
+    voiceLoopChunks = [];
+    singVoiceLoopUtterance(blob, generation);
+  }, { once: true });
+  voiceLoopRecorder.start();
+  voiceLoopState = 'recording';
+  muteMusicForVoiceLoop();
+  voiceLoopUtteranceStartedAt = performance.now();
+  voiceLoopLastVoiceAt = voiceLoopUtteranceStartedAt;
+  voiceLoopStatus.textContent = '听到你说话了，正在录音';
+}
+
+function monitorVoiceLoop(generation) {
+  if (!voiceLoopEnabled || generation !== voiceLoopGeneration || !voiceLoopAnalyser) return;
+  const samples = new Float32Array(voiceLoopAnalyser.fftSize);
+  voiceLoopAnalyser.getFloatTimeDomainData(samples);
+  let sumSquares = 0;
+  for (const sample of samples) sumSquares += sample * sample;
+  const rms = Math.sqrt(sumSquares / samples.length);
+  const now = performance.now();
+  const threshold = Math.max(0.022, voiceLoopNoiseFloor * 3.2);
+
+  if (voiceLoopState === 'waiting') {
+    voiceLoopNoiseFloor = voiceLoopNoiseFloor * 0.96 + Math.min(rms, 0.02) * 0.04;
+    if (rms > threshold) startVoiceLoopUtterance(generation);
+  } else if (voiceLoopState === 'recording') {
+    if (rms > threshold) voiceLoopLastVoiceAt = now;
+    const silenceReached =
+      now - voiceLoopLastVoiceAt >= VOICE_LOOP_SILENCE_MS &&
+      now - voiceLoopUtteranceStartedAt >= 450;
+    const tooLong =
+      now - voiceLoopUtteranceStartedAt >= VOICE_LOOP_MAX_UTTERANCE_MS;
+    if ((silenceReached || tooLong) && voiceLoopRecorder?.state === 'recording') {
+      voiceLoopStatus.textContent = '说完了，正在准备唱出来';
+      voiceLoopRecorder.stop();
+    }
+  }
+  voiceLoopFrame = requestAnimationFrame(() => monitorVoiceLoop(generation));
+}
+
+async function startVoiceLoop() {
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+    setVoiceLoopButton(false, '当前浏览器不支持麦克风自动复读');
+    return;
+  }
+  const generation = ++voiceLoopGeneration;
+  setVoiceLoopButton(true, '正在请求麦克风权限');
+  try {
+    voiceLoopStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
+    if (!voiceLoopEnabled || generation !== voiceLoopGeneration) {
+      for (const track of voiceLoopStream.getTracks()) track.stop();
+      voiceLoopStream = null;
+      return;
+    }
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    voiceLoopContext = new AudioContextClass();
+    await voiceLoopContext.resume();
+    const source = voiceLoopContext.createMediaStreamSource(voiceLoopStream);
+    voiceLoopAnalyser = voiceLoopContext.createAnalyser();
+    voiceLoopAnalyser.fftSize = 1024;
+    voiceLoopAnalyser.smoothingTimeConstant = 0.2;
+    source.connect(voiceLoopAnalyser);
+    voiceLoopState = 'waiting';
+    voiceLoopNoiseFloor = 0.008;
+    voiceLoopStatus.textContent = '正在听，请说话';
+    monitorVoiceLoop(generation);
+  } catch (error) {
+    const denied = error?.name === 'NotAllowedError';
+    await stopVoiceLoop();
+    voiceLoopStatus.textContent = denied
+      ? '麦克风权限被拒绝，请允许权限后重试'
+      : `麦克风启动失败：${error.message || '没有可用设备'}`;
+  }
+}
+
+voiceLoopButton.addEventListener('click', async () => {
+  if (voiceLoopEnabled) await stopVoiceLoop();
+  else await startVoiceLoop();
+});
+
+function resetSingingInput({ focusFileButton = true } = {}) {
+  midiStopPlayback();
+  midiData = null;
+  midiDuration = 0;
+  midiNoteIndex = 0;
+  midiPausedAt = 0;
+  midiFileInput.value = '';
+  midiTracks.innerHTML = '';
+  midiFileInfo.textContent = '';
+  midiFileInfo.style.display = 'none';
+  midiPlayBtn.disabled = true;
+  midiStopBtn.disabled = true;
+  if (focusFileButton) midiFileButton.focus();
+}
+
+midiButton.addEventListener('click', () => {
+  midiOverlay.inert = false;
+  midiOverlay.classList.add('is-open');
+  midiOverlay.setAttribute('aria-hidden', 'false');
+});
+
+function midiCloseDialog(stopPlayback = true) {
+  midiOverlay.inert = true;
+  midiOverlay.classList.remove('is-open');
+  midiOverlay.setAttribute('aria-hidden', 'true');
+  if (stopPlayback) midiStopPlayback();
+}
+
+midiClose.addEventListener('click', () => midiCloseDialog(midiPlayState === 'stopped'));
+midiOverlay.addEventListener('pointerdown', (e) => { if (e.target === midiOverlay) midiCloseDialog(midiPlayState === 'stopped'); });
+for (const ev of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+  midiOverlay.addEventListener(ev, (e) => e.stopPropagation());
+}
+midiPanel.addEventListener('click', (e) => e.stopPropagation());
+
+midiFileButton.addEventListener('click', () => midiFileInput.click());
+function configureParsedMidi(parsed, label) {
+  midiData = parsed;
+  const tracks = midiData.track.filter(t => t.event && t.event.length);
+  if (!tracks.length) throw new Error('没有找到音轨');
+  let tempoUs = 500000;
+  for (const track of tracks) {
+    for (const event of track.event) {
+      if (event.type === 0xFF && event.metaType === 0x51 && typeof event.data === 'number') {
+        tempoUs = event.data;
+      }
+    }
+  }
+  const ppq = midiData.timeDivision || 480;
+  const bpm = Math.round(60000000 / tempoUs);
+  const channels = {};
+  for (const track of tracks) {
+    for (const event of track.event) {
+      if (event.type === 9 && event.data && event.data[1] > 0) {
+        const ch = event.channel ?? 0;
+        if (!channels[ch]) channels[ch] = { noteCount: 0 };
+        channels[ch].noteCount++;
+      }
+    }
+  }
+  const sortedChs = Object.keys(channels)
+    .sort((a, b) => channels[b].noteCount - channels[a].noteCount);
+  midiData._channels = channels;
+  midiData._sortedChs = sortedChs;
+  midiFileInfo.textContent =
+    `${label} | MIDI | ${sortedChs.length} 通道 | ${bpm} BPM | ${ppq} PPQ`;
+  midiTracks.innerHTML = sortedChs.map(ch => {
+    const isDrum = ch === '9' || ch === '10';
+    return `<label style="font-size:12px;display:flex;align-items:center;gap:6px;color:#777;">
+      <input type="checkbox" class="midi-ch-cb" data-ch="${ch}" ${isDrum ? '' : 'checked'} />
+      通道 ${ch}${isDrum ? ' 🥁' : ''}（${channels[ch].noteCount} 音符）
+    </label>`;
+  }).join('');
+}
+
+async function configureAudioFile(file, arrayBuffer) {
+  if (typeof AudioMelody === 'undefined') {
+    throw new Error('音频旋律分析模块未加载');
+  }
+  if (!ctx) initAudio();
+  midiFileInfo.textContent = `${file.name} | 正在解码音频…`;
+  let decoded;
+  try {
+    decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
+  } catch (directError) {
+    const bytes = new Uint8Array(arrayBuffer, 0, Math.min(12, arrayBuffer.byteLength));
+    const isMp4 =
+      bytes.length >= 8 &&
+      String.fromCharCode(...bytes.slice(4, 8)) === 'ftyp';
+    if (!isMp4) throw directError;
+    midiFileInfo.textContent = `${file.name} | 检测到 MP4 容器，正在提取 AAC 音轨…`;
+    const audioOnlyMp4 = await extractMp4AudioTrack(arrayBuffer);
+    decoded = await ctx.decodeAudioData(audioOnlyMp4);
+  }
+  if (decoded.duration > 600) throw new Error('音频超过 10 分钟');
+  const channels = Array.from(
+    { length: decoded.numberOfChannels },
+    (_, index) => decoded.getChannelData(index)
+  );
+  midiFileInfo.textContent = `${file.name} | 正在准备音频…`;
+  const prepared = AudioMelody.prepareSamples(channels, decoded.sampleRate, {
+    targetRate: 12000,
+    maxSeconds: 600,
+  });
+  const result = await AudioMelody.analyzeSamples(
+    prepared.samples,
+    prepared.sampleRate,
+    {
+      minFrequency: 110,
+      maxFrequency: 1000,
+      onProgress(progress) {
+        midiFileInfo.textContent =
+          `${file.name} | 正在分析主旋律 ${Math.round(progress * 100)}%`;
+      },
+    }
+  );
+  if (!result.notes.length) {
+    throw new Error('没有识别到稳定旋律；请尝试人声更突出或接近清唱的音频');
+  }
+  const singingNotes = result.notes.map((note, index) => ({
+    ...note,
+    ch: String(index % 3),
+  }));
+  midiData = {
+    track: [],
+    timeDivision: 480,
+    _audioNotes: singingNotes,
+    _sortedChs: ['0', '1', '2'],
+  };
+  midiFileInfo.textContent =
+    `${file.name} | 音频旋律（${result.method === 'spectral' ? '混音增强' : '精确音高'}） | ` +
+    `${singingNotes.length} 个音符 | ${formatTime(decoded.duration)}`;
+  midiTracks.innerHTML =
+    `<div style="font-size:12px;color:#777;">已提取主旋律并按三个音节循环演唱；分析仅在本机完成</div>`;
+}
+
+async function extractMp4AudioTrack(arrayBuffer) {
+  const { createFile } = await import('./lib/mp4box.all.mjs');
+  const mp4File = createFile();
+  return new Promise((resolve, reject) => {
+    const fragments = [];
+    let initBuffer = null;
+    let settled = false;
+    const finish = async () => {
+      if (settled || !initBuffer || !fragments.length) return;
+      settled = true;
+      const buffers = [initBuffer, ...fragments];
+      const total = buffers.reduce((sum, buffer) => sum + buffer.byteLength, 0);
+      const joined = new Uint8Array(total);
+      let offset = 0;
+      for (const buffer of buffers) {
+        joined.set(new Uint8Array(buffer), offset);
+        offset += buffer.byteLength;
+      }
+      resolve(joined.buffer);
+    };
+    mp4File.onError = error => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(`MP4 音轨解析失败: ${error}`));
+      }
+    };
+    mp4File.onReady = info => {
+      const audioTrack = info.audioTracks?.[0];
+      if (!audioTrack) {
+        settled = true;
+        reject(new Error('MP4 文件中没有音频轨'));
+        return;
+      }
+      mp4File.setSegmentOptions(audioTrack.id, null, {
+        nbSamples: 1000,
+        nbSamplesPerFragment: 1000,
+        rapAlignement: false,
+        normalizeAudioSampleEntriesForMSE: true,
+      });
+      const initialization = mp4File.initializeSegmentation();
+      if (Array.isArray(initialization)) {
+        initBuffer = initialization.find(
+          segment => segment.id === audioTrack.id
+        )?.buffer || null;
+      } else {
+        initBuffer = initialization?.buffer || null;
+      }
+      mp4File.start();
+    };
+    mp4File.onSegment = (_id, _user, buffer, _sampleNumber, last) => {
+      fragments.push(buffer);
+      if (last) finish();
+    };
+    const input = arrayBuffer.slice(0);
+    input.fileStart = 0;
+    mp4File.appendBuffer(input);
+    mp4File.flush();
+    setTimeout(() => finish(), 0);
+  });
+}
+
+midiFileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  midiStopPlayback();
+  midiData = null;
+  midiPlayBtn.disabled = true;
+  midiTracks.innerHTML = '';
+  midiFileInfo.style.display = 'block';
+  midiFileInfo.textContent = `${file.name} | 正在读取…`;
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const isMidi =
+      /\.midi?$/i.test(file.name) ||
+      file.type === 'audio/midi' ||
+      file.type === 'audio/x-midi';
+    if (isMidi) {
+      const uint8 = new Uint8Array(arrayBuffer);
+      configureParsedMidi(MidiParser.parse(uint8), file.name);
+    } else {
+      await configureAudioFile(file, arrayBuffer);
+    }
+    midiPlayBtn.disabled = false;
+    midiStopBtn.disabled = false;
+    midiProgressBar.style.width = '0%';
+    midiTime.textContent = '0:00 / 0:00';
+  } catch (error) {
+    midiFileInfo.textContent = `解析失败: ${error.message}`;
+    midiData = null;
+    midiPlayBtn.disabled = true;
+    midiStopBtn.disabled = false;
+  } finally {
+    e.target.value = '';
+  }
+});
+
+midiPlayBtn.addEventListener('click', () => {
+  if (midiPlayState === 'playing') {
+    midiPlayState = 'paused';
+    midiPlayBtn.textContent = '▶ 继续';
+    clearInterval(midiTimer);
+    midiStopAllVoices();
+  } else {
+    if (!bgmMuted) toggleMusic();
+    if (ctx && ctx.state === 'suspended') ctx.resume();
+    midiSchedulePlayback();
+    midiCloseDialog(false);
+  }
+});
+
+midiStopBtn.addEventListener('click', () => resetSingingInput());
+
+// 内置歌曲列表
+const midiBuiltin = document.getElementById('midi-builtin');
+try {
+if (typeof window.BMIDI !== 'undefined') {
+  midiBuiltin.innerHTML = Object.keys(window.BMIDI).map(name =>
+    `<button class="control-button midi-builtin-btn" type="button" data-name="${name}" style="width:100%;padding:8px;font-size:13px;font-weight:700;text-align:left;">
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" style="vertical-align:middle;margin-right:6px;">
+        <path d="M8 5v14l11-7z" fill="currentColor"/>
+      </svg>
+      ${name}
+    </button>`
+  ).join('');
+  midiBuiltin.addEventListener('click', (e) => {
+    const btn = e.target.closest('.midi-builtin-btn');
+    if (!btn) return;
+    const name = btn.dataset.name;
+    const b64 = window.BMIDI[name];
+    if (!b64) return;
+    if (!bgmMuted) toggleMusic();
+    if (ctx && ctx.state === 'suspended') ctx.resume();
+    const binaryStr = atob(b64);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+    midiData = MidiParser.parse(bytes);
+    // 显示通道列表（和导入文件一样）
+    const trks = midiData.track.filter(t => t.event && t.event.length);
+    if (!trks.length) return;
+    let tempoUs = 500000;
+    for (const t of trks) for (const ev of t.event) {
+      if (ev.type === 0xFF && ev.metaType === 0x51 && typeof ev.data === 'number') tempoUs = ev.data;
+    }
+    const ppq = midiData.timeDivision || 480;
+    const bpm = Math.round(60000000 / tempoUs);
+    const channels = {};
+    for (const t of trks) for (const ev of t.event) {
+      if (ev.type === 9 && ev.data && ev.data[1] > 0) {
+        const ch = ev.channel ?? 0;
+        if (!channels[ch]) channels[ch] = { noteCount: 0 };
+        channels[ch].noteCount++;
+      }
+    }
+    const sortedChs = Object.keys(channels).sort((a, b) => channels[b].noteCount - channels[a].noteCount);
+    midiData._channels = channels;
+    midiData._sortedChs = sortedChs;
+    midiFileInfo.style.display = 'block';
+    midiFileInfo.textContent = name + ' | ' + sortedChs.length + ' 通道 | ' + bpm + ' BPM';
+    midiTracks.innerHTML = sortedChs.map(ch =>
+      '<label style="font-size:12px;display:flex;align-items:center;gap:6px;color:#777;">' +
+      '<input type="checkbox" class="midi-ch-cb" data-ch="' + ch + '" checked />通道 ' + ch + '（' + channels[ch].noteCount + ' 音符）</label>'
+    ).join('');
+    midiPlayBtn.disabled = false;
+    midiStopBtn.disabled = false;
+    midiProgressBar.style.width = '0%';
+    midiTime.textContent = '0:00 / 0:00';
+    midiSchedulePlayback();
+    midiCloseDialog(false);
+  });
+}
+} catch(e) { console.warn('[MIDI init error]', e); }

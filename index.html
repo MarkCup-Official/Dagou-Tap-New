@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#fff2dc" />
 <title>大狗Tap</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐶</text></svg>" />
-<script src="//s1.hdslb.com/bfs/seed/toy/app/sdk/toy-sdk.js"></script>
+<!-- 离线模式：已移除 B站 Toy SDK -->
 <style>
   /* 全页面限定调色板：米白底 + 主色黄 + 次色灰（极少点缀色） */
   :root {
@@ -49,57 +49,7 @@
 
   /* 常驻作者署名：始终位于页面最前层。
      两行严格等宽；Created by 整体跟拍，MarkCup 每拍依次放大一个字母。 */
-  #author-link {
-    position: absolute;
-    right: max(18px, env(safe-area-inset-right));
-    bottom: max(16px, env(safe-area-inset-bottom));
-    z-index: 30;
-    padding: 10px 12px 11px;
-    display: block;
-    pointer-events: none;
-    user-select: none;
-  }
-  .author-copy {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    width: 124px;
-    gap: 5px;
-  }
-  .author-label,
-  .author-name {
-    width: 100%;
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-  }
-  .author-label {
-    color: rgba(255, 180, 0, .78);
-    font: 600 9px/1 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-    letter-spacing: 0;
-    text-transform: uppercase;
-    white-space: nowrap;
-    transform-origin: 50% 70%;
-    transform:
-      translateY(var(--author-lift, 0px))
-      scale(var(--author-rhythm-scale, 1));
-    transition: color .22s ease;
-  }
-  .author-name {
-    width: calc(100% + 6px);
-    margin-left: -3px;
-    color: var(--amber);
-    font: 700 20px/1.15 "Noto Serif SC", "Songti SC", SimSun, serif;
-    letter-spacing: 0;
-    white-space: nowrap;
-    transition: color .22s ease;
-  }
-  /* JS 将两行拆成等距字符；仅 MarkCup 字母逐拍放大 */
-  .author-letter {
-    display: inline-block;
-    transform-origin: 50% 72%;
-    will-change: transform;
-  }
+
   /* 分区按钮闪光层：点击/滑过时分区短暂显示半透明白色再淡出 */
   #zoneflash {
     position: absolute;
@@ -320,22 +270,10 @@
   #top-controls.is-revealing-fast {
     transition-duration: .2s;
   }
-  /* 有未读红点时只固定设置入口；音乐/音效按钮仍按原规则隐藏。 */
   #audio-controls {
     opacity: 1;
     transform: translateY(0);
     transition: opacity .5s ease, transform .5s cubic-bezier(.2, .8, .2, 1);
-  }
-  #top-controls.has-update-dot:not(.is-visible) {
-    opacity: 1;
-    transform: translateY(0);
-  }
-  #top-controls.has-update-dot:not(.is-visible) #audio-controls {
-    opacity: 0;
-    transform: translateY(-8px);
-  }
-  #top-controls.has-update-dot:not(.is-visible) #audio-controls .control-button {
-    pointer-events: none;
   }
   .control-group {
     display: flex;
@@ -410,120 +348,25 @@
     color: var(--coral);
   }
   .control-button.is-muted .mute-slash { opacity: 1; }
-
-  /* 设置按钮红点：八边形呼应几何特效，珊瑚色点缀；外圈米白描边让它从按钮上跳出来。
-     律动缩放由 JS 随节拍写入 --rhythm-scale（同控制按钮）。 */
-  #settings-wrap { position: relative; }
-  #update-dot {
+  .control-button.is-listening {
+    --btn-edge: rgba(255, 90, 95, .85);
+    --btn-fill: rgba(255, 238, 238, .96);
+    color: var(--coral);
+  }
+  .sr-only {
     position: absolute;
-    top: -5px;
-    right: -5px;
-    z-index: 2;
-    width: 15px;
-    height: 15px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(255, 250, 240, .96);
-    clip-path: polygon(32% 0, 68% 0, 100% 32%, 100% 68%, 68% 100%, 32% 100%, 0 68%, 0 32%);
-    filter: drop-shadow(0 0 3px rgba(255, 90, 95, .55));
-    pointer-events: none;
-    transform: scale(var(--rhythm-scale, 1));
-    will-change: transform;
-  }
-  #update-dot::before {
-    content: "";
-    width: 9px;
-    height: 9px;
-    background: var(--coral);
-    clip-path: polygon(32% 0, 68% 0, 100% 32%, 100% 68%, 68% 100%, 32% 100%, 0 68%, 0 32%);
-  }
-  #update-dot.is-hidden { display: none; }
-
-  /* 新用户引导气泡：跟随设置红点同生共灭（#top-controls.has-update-dot），
-     醒目箭头指向设置按钮；只做展示，绝不拦截点击。 */
-  #settings-hint {
-    position: absolute;
-    top: calc(100% + 9px);
-    right: 0;
-    z-index: 3;
-    pointer-events: none;
-    opacity: 0;
-    transform: translateY(-6px) scale(.92);
-    transform-origin: top right;
-    filter: drop-shadow(0 6px 12px rgba(255, 180, 0, .38));
-    transition: opacity .3s ease, transform .34s cubic-bezier(.34, 1.4, .4, 1);
-  }
-  #top-controls.has-update-dot #settings-hint {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-  .settings-hint-bob {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    animation: settingsHintBob 1.5s ease-in-out infinite;
-  }
-  @keyframes settingsHintBob {
-    50% { transform: translateY(-4px); }
-  }
-  .settings-hint-arrow {
-    width: 20px;
-    height: 24px;
-    margin-right: 17px;
-    margin-bottom: -2px;
-    color: var(--amber);
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 3;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-  .settings-hint-bubble {
-    padding: 8px 13px 9px;
-    color: #fffaf0;
-    background: var(--amber);
-    clip-path: polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px),
-                       calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px), 0 10px);
-    font: 750 12px/1.55 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-    letter-spacing: .04em;
-    text-align: center;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
     white-space: nowrap;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .settings-hint-bob { animation: none; }
+    border: 0;
   }
 
-  /* Toy SDK 状态提示：不打断演奏，也不会把点击穿透到舞台。 */
-  #toy-notice {
-    position: absolute;
-    left: 50%;
-    bottom: max(24px, calc(env(safe-area-inset-bottom) + 16px));
-    z-index: 60;
-    width: min(420px, calc(100% - 32px));
-    padding: 12px 16px;
-    color: #6f6a63;
-    background: rgba(255, 250, 240, .97);
-    border: 2px solid rgba(255, 180, 0, .72);
-    border-radius: 12px;
-    box-shadow: 0 10px 28px rgba(135, 131, 126, .24);
-    font-size: 13px;
-    font-weight: 650;
-    line-height: 1.55;
-    text-align: center;
-    opacity: 0;
-    pointer-events: none;
-    transform: translate(-50%, 12px) scale(.98);
-    transition: opacity .2s ease, transform .2s ease;
-  }
-  #toy-notice.is-visible {
-    opacity: 1;
-    transform: translate(-50%, 0) scale(1);
-  }
-  #toy-notice.is-error {
-    color: #9e4145;
-    border-color: rgba(255, 90, 95, .72);
-  }
+  /* 设置按钮包裹（原红点位置保留） */
+  #settings-wrap { position: relative; }
   @media (max-width: 430px) {
     #top-controls {
       top: max(10px, env(safe-area-inset-top));
@@ -535,19 +378,6 @@
       padding-inline: 10px;
     }
     .control-button span { display: none; }
-    #author-link {
-      right: max(10px, env(safe-area-inset-right));
-      bottom: max(10px, env(safe-area-inset-bottom));
-      min-width: 0;
-      max-width: calc(100% - 20px);
-      padding: 8px 9px 7px 12px;
-    }
-    .author-copy { width: 106px; }
-    .author-name {
-      width: calc(100% + 4px);
-      margin-left: -2px;
-      font-size: 15px;
-    }
   }
 
   /* 开始遮罩（首次点击解锁音频） */
@@ -581,7 +411,8 @@
   @keyframes pulse { 50% { opacity: .35; } }
 
   /* 设置菜单：与开始遮罩同款的半透明米白背景，盖在所有常驻元素之上 */
-  #settings-overlay {
+  #settings-overlay,
+  #midi-overlay {
     position: absolute;
     inset: 0;
     z-index: 40;
@@ -594,14 +425,18 @@
     pointer-events: none;
     transition: opacity .28s ease;
   }
-  #settings-overlay.is-open {
+  #settings-overlay.is-open,
+  #midi-overlay.is-open {
     opacity: 1;
     pointer-events: auto;
   }
-  /* 面板沿用控制按钮的切角描边手法：外框充当描边色，::before 铺底色 */
-  #settings-panel {
+  #settings-panel,
+  #midi-panel {
     position: relative;
     width: min(384px, 100%);
+    max-height: min(520px, calc(100vh - 44px));
+    display: flex;
+    flex-direction: column;
     background: rgba(135, 131, 126, .5);
     clip-path: polygon(18px 0, calc(100% - 18px) 0, 100% 18px, 100% calc(100% - 18px),
                        calc(100% - 18px) 100%, 18px 100%, 0 calc(100% - 18px), 0 18px);
@@ -609,10 +444,12 @@
     transform: translateY(10px) scale(.97);
     transition: transform .32s cubic-bezier(.2, .8, .2, 1);
   }
-  #settings-overlay.is-open #settings-panel {
+  #settings-overlay.is-open #settings-panel,
+  #midi-overlay.is-open #midi-panel {
     transform: translateY(0) scale(1);
   }
-  #settings-panel::before {
+  #settings-panel::before,
+  #midi-panel::before {
     content: "";
     position: absolute;
     inset: 2px;
@@ -976,51 +813,6 @@
   }
   .sfx-option.is-locked .sfx-icon,
   .sfx-option.is-locked .sfx-name { opacity: .52; }
-  .sfx-status {
-    position: absolute;
-    top: 6px;
-    right: 6px;
-    z-index: 2;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    pointer-events: none;
-  }
-  .sfx-new {
-    padding: 3px 5px 2px;
-    color: #fffaf0;
-    background: var(--coral);
-    border-radius: 999px;
-    font-size: 8px;
-    font-weight: 900;
-    line-height: 1;
-    letter-spacing: .08em;
-    box-shadow: 0 2px 6px rgba(255, 90, 95, .28);
-  }
-  .sfx-lock {
-    width: 19px;
-    height: 19px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #77736e;
-    background: rgba(255, 250, 240, .94);
-    border-radius: 50%;
-    box-shadow: 0 2px 6px rgba(135, 131, 126, .24);
-  }
-  .sfx-lock svg {
-    width: 11px;
-    height: 11px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 2.2;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-  .sfx-option:not(.is-locked) .sfx-lock,
-  .skin-option:not(.is-locked) .sfx-lock,
-  .sfx-option.is-new-hidden .sfx-new,
-  .skin-option.is-new-hidden .sfx-new { display: none; }
   .sfx-icon {
     width: 44px;
     height: 44px;
@@ -1124,6 +916,7 @@
     --btn-fill: rgba(242, 239, 233, .94);
   }
   .skin-option.is-locked .skin-icon { opacity: .52; }
+  .skin-option.is-locked .skin-hint { color: #b57e00; }
   .skin-icon {
     flex: none;
     width: 34px;
@@ -1164,143 +957,9 @@
     outline-offset: 2px;
   }
 
-  /* 已登录站内用户点击锁定项时的居中确认框。沿用设置面板的切角、米白底与琥珀色，
-     但层级更高，确保确认期间不会误触下方设置。 */
-  #unlock-confirm-overlay {
-    position: absolute;
-    inset: 0;
-    z-index: 70;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 22px;
-    background: rgba(111, 106, 99, .28);
-    backdrop-filter: blur(4px);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity .22s ease;
-  }
-  #unlock-confirm-overlay.is-open {
-    opacity: 1;
-    pointer-events: auto;
-  }
-  #unlock-confirm-dialog {
-    position: relative;
-    isolation: isolate;
-    width: min(350px, 100%);
-    padding: 24px 22px 20px;
-    color: #6f6a63;
-    background: rgba(255, 180, 0, .78);
-    clip-path: polygon(18px 0, calc(100% - 18px) 0, 100% 18px, 100% calc(100% - 18px),
-                       calc(100% - 18px) 100%, 18px 100%, 0 calc(100% - 18px), 0 18px);
-    filter: drop-shadow(0 18px 42px rgba(80, 76, 71, .3));
-    text-align: center;
-    transform: translateY(10px) scale(.96);
-    transition: transform .28s cubic-bezier(.2, .8, .2, 1);
-  }
-  #unlock-confirm-overlay.is-open #unlock-confirm-dialog {
-    transform: translateY(0) scale(1);
-  }
-  #unlock-confirm-dialog::before {
-    content: "";
-    position: absolute;
-    inset: 2px;
-    z-index: -1;
-    background: rgba(255, 250, 240, .98);
-    clip-path: polygon(16px 0, calc(100% - 16px) 0, 100% 16px, 100% calc(100% - 16px),
-                       calc(100% - 16px) 100%, 16px 100%, 0 calc(100% - 16px), 0 16px);
-  }
-  .unlock-confirm-icon {
-    width: 50px;
-    height: 50px;
-    margin: 0 auto 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #fffaf0;
-    background: var(--amber);
-    clip-path: polygon(14px 0, calc(100% - 14px) 0, 100% 14px, 100% calc(100% - 14px),
-                       calc(100% - 14px) 100%, 14px 100%, 0 calc(100% - 14px), 0 14px);
-    filter: drop-shadow(0 6px 12px rgba(255, 180, 0, .28));
-  }
-  .unlock-confirm-icon svg {
-    width: 26px;
-    height: 26px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 2;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-  .unlock-confirm-title {
-    color: var(--amber);
-    font-size: 20px;
-    font-weight: 900;
-    letter-spacing: .08em;
-  }
-  .unlock-confirm-message {
-    margin: 10px 2px 18px;
-    color: #77736e;
-    font-size: 13px;
-    font-weight: 600;
-    line-height: 1.65;
-  }
-  .unlock-confirm-actions {
-    display: grid;
-    grid-template-columns: .8fr 1.3fr;
-    gap: 10px;
-  }
-  .unlock-confirm-button {
-    position: relative;
-    isolation: isolate;
-    min-height: 44px;
-    padding: 9px 12px;
-    border: none;
-    color: #77736e;
-    background: rgba(135, 131, 126, .46);
-    clip-path: polygon(10px 0, calc(100% - 10px) 0, 100% 10px, 100% calc(100% - 10px),
-                       calc(100% - 10px) 100%, 10px 100%, 0 calc(100% - 10px), 0 10px);
-    font: 750 13px/1.25 "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-    cursor: pointer;
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
-    transition: transform .16s ease, background .2s ease;
-  }
-  .unlock-confirm-button::before {
-    content: "";
-    position: absolute;
-    inset: 2px;
-    z-index: -1;
-    background: rgba(255, 255, 255, .78);
-    clip-path: polygon(8px 0, calc(100% - 8px) 0, 100% 8px, 100% calc(100% - 8px),
-                       calc(100% - 8px) 100%, 8px 100%, 0 calc(100% - 8px), 0 8px);
-  }
-  .unlock-confirm-button.is-primary {
-    color: #b57e00;
-    background: rgba(255, 180, 0, .9);
-  }
-  .unlock-confirm-button.is-primary::before { background: rgba(255, 244, 224, .98); }
-  @media (hover: hover) {
-    .unlock-confirm-button:hover { background: rgba(255, 180, 0, .7); }
-  }
-  .unlock-confirm-button:active { transform: scale(.96); }
-  .unlock-confirm-button:disabled {
-    opacity: .66;
-    cursor: wait;
-  }
-  .unlock-confirm-button:focus-visible {
-    outline: 3px solid rgba(62, 123, 250, .4);
-    outline-offset: 2px;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    #unlock-confirm-overlay,
-    #unlock-confirm-dialog { transition: none; }
-  }
-
   @media (max-width: 430px) {
     #settings-overlay { padding: 14px; }
-    #unlock-confirm-overlay { padding: 16px; }
-    #unlock-confirm-dialog { padding: 22px 17px 17px; }
+    #midi-overlay { padding: 14px; }
     .settings-scroll { padding: 12px 13px 14px; }
     .author-avatar { width: 46px; height: 46px; }
     .author-id { font-size: 15px; }
@@ -1310,12 +969,6 @@
 <body>
   <div id="stage">
     <canvas id="fx"></canvas>
-    <div id="author-link" aria-hidden="true">
-      <span class="author-copy" aria-hidden="true">
-        <span class="author-label">Created by</span>
-        <span class="author-name">MarkCup</span>
-      </span>
-    </div>
     <div id="key-grid" aria-hidden="true"></div>
     <div id="zoneflash"></div>
     <div id="octave-controls" aria-label="钢琴八度切换" aria-hidden="true" inert>
@@ -1342,7 +995,7 @@
     </div>
     <img id="dog-animation-atlas" alt="" hidden decoding="async" fetchpriority="low" />
 
-    <div id="top-controls" class="is-visible has-update-dot" aria-label="声音与导航控制">
+    <div id="top-controls" class="is-visible" aria-label="声音与导航控制">
       <div id="audio-controls" class="control-group">
         <button id="music-toggle" class="control-button" type="button" aria-label="关闭音乐" aria-pressed="false">
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1361,7 +1014,22 @@
           </svg>
           <span>音效</span>
         </button>
-      </div>
+        <button id="midi-button" class="control-button" type="button" aria-label="MIDI 演奏" aria-haspopup="dialog">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="5" width="18" height="14" rx="2" />
+            <path d="M8 5v14M16 5v14M3 12h18M3 16h18M3 8h18" />
+          </svg>
+        <span>唱歌</span>
+      </button>
+        <button id="voice-loop-button" class="control-button" type="button" role="switch" aria-checked="false" aria-label="开启自动复读">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="9" y="3" width="6" height="11" rx="3" />
+            <path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21M8.5 21h7" />
+          </svg>
+          <span>复读</span>
+        </button>
+        <span id="voice-loop-status" class="sr-only" role="status" aria-live="polite">自动复读已关闭</span>
+    </div>
       <div id="settings-wrap">
         <button id="settings-button" class="control-button" type="button" aria-label="打开设置菜单" aria-haspopup="dialog">
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1370,13 +1038,6 @@
           </svg>
           <span>设置</span>
         </button>
-        <i id="update-dot" aria-hidden="true"></i>
-        <div id="settings-hint" aria-hidden="true">
-          <div class="settings-hint-bob">
-            <svg class="settings-hint-arrow" viewBox="0 0 24 24"><path d="M12 20V6M6 12l6-6 6 6" /></svg>
-            <span class="settings-hint-bubble">点击设置<br />切换大狗叫音效</span>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -1430,11 +1091,7 @@
                 <span class="sfx-icon"><img src="Image/dagou_close_mouth.png" alt="" draggable="false" /></span>
                 <span class="sfx-name">大狗叫</span>
               </button>
-              <button class="sfx-option is-locked" type="button" role="radio" aria-checked="false" aria-label="叮咚鸡，未解锁" data-sfx="dingdong">
-                <span class="sfx-status" aria-hidden="true">
-                  <span class="sfx-new">NEW</span>
-                  <span class="sfx-lock"><svg viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="2" /><path d="M5 7V5a3 3 0 016 0v2" /></svg></span>
-                </span>
+              <button class="sfx-option" type="button" role="radio" aria-checked="false" data-sfx="dingdong">
                 <span class="sfx-icon">
                   <img src="Image/dingdongji_close_mouth.png" alt="" draggable="false" />
                 </span>
@@ -1458,15 +1115,11 @@
                       <span class="skin-hint">默认形象</span>
                     </span>
                   </button>
-                  <button class="skin-option is-locked" type="button" role="radio" aria-checked="false" aria-label="哈基米帝皇形象，观看开发视频后解锁" data-skin="emperor">
-                    <span class="sfx-status" aria-hidden="true">
-                      <span class="sfx-new">NEW</span>
-                      <span class="sfx-lock"><svg viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="2" /><path d="M5 7V5a3 3 0 016 0v2" /></svg></span>
-                    </span>
+                  <button class="skin-option" type="button" role="radio" aria-checked="false" aria-label="哈基米帝皇形象" data-skin="emperor">
                     <span class="skin-icon"><img src="Image/donghaidihuang_icon.webp" alt="" draggable="false" /></span>
                     <span class="skin-copy">
                       <span class="skin-name">帝皇</span>
-                      <span class="skin-hint">观看开发视频后解锁</span>
+                      <span class="skin-hint">已解锁</span>
                     </span>
                   </button>
                 </div>
@@ -1477,59 +1130,96 @@
           <section class="settings-section" aria-label="演奏设置">
             <div class="settings-label">演奏 · Performance</div>
             <div class="performance-settings">
-              <button class="setting-row" id="piano-mode-setting" type="button" role="switch" aria-checked="false" data-setting="pianoMode" disabled>
+              <button class="setting-row" id="piano-mode-setting" type="button" role="switch" aria-checked="false" data-setting="pianoMode">
                 <span class="setting-copy">
                   <span class="setting-name">钢琴模式</span>
                   <span class="setting-description">开放一个八度的音阶</span>
                 </span>
                 <span class="setting-switch" aria-hidden="true"></span>
               </button>
-              <button class="setting-row" id="octave-switching-setting" type="button" role="switch" aria-checked="false" data-setting="octaveSwitching" hidden disabled>
+              <button class="setting-row" id="octave-switching-setting" type="button" role="switch" aria-checked="false" data-setting="octaveSwitching" hidden>
                 <span class="setting-copy">
                   <span class="setting-name">八度切换</span>
                   <span class="setting-description">在屏幕边缘切换 C3–C6 起始八度</span>
                 </span>
                 <span class="setting-switch" aria-hidden="true"></span>
               </button>
-              <button class="setting-row" id="rhythm-snap-setting" type="button" role="switch" aria-checked="true" data-setting="rhythmSnap" disabled>
+              <button class="setting-row" id="rhythm-snap-setting" type="button" role="switch" aria-checked="true" data-setting="rhythmSnap">
                 <span class="setting-copy">
                   <span class="setting-name">强化节奏</span>
                   <span class="setting-description">启用节奏吸附</span>
                 </span>
                 <span class="setting-switch" aria-hidden="true"></span>
               </button>
-              <button class="setting-row" id="show-grid-setting" type="button" role="switch" aria-checked="false" data-setting="showGrid" disabled>
+              <button class="setting-row" id="show-grid-setting" type="button" role="switch" aria-checked="false" data-setting="showGrid">
                 <span class="setting-copy">
                   <span class="setting-name">显示网格</span>
                   <span class="setting-description">显示按键的网格</span>
                 </span>
                 <span class="setting-switch" aria-hidden="true"></span>
               </button>
+              <button class="setting-row" id="zone-colors-setting" type="button" role="switch" aria-checked="true" data-setting="zoneColors">
+                <span class="setting-copy">
+                  <span class="setting-name">彩色光效</span>
+                  <span class="setting-description">上蓝 / 中绿 / 下红</span>
+                </span>
+                <span class="setting-switch" aria-hidden="true"></span>
+              </button>
             </div>
-            <div id="performance-settings-status" role="status">正在读取哔哩哔哩云端设置…</div>
+            <div id="performance-settings-status" role="status">设置已保存到本地</div>
           </section>
         </div>
       </div>
     </div>
 
-    <div id="unlock-confirm-overlay" aria-hidden="true" inert>
-      <div id="unlock-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="unlock-confirm-title" aria-describedby="unlock-confirm-message">
-        <div class="unlock-confirm-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24">
-            <rect x="5" y="10" width="14" height="10" rx="2" />
-            <path d="M8 10V7a4 4 0 018 0v3M11 14l4 2-4 2z" />
-          </svg>
-        </div>
-        <div class="unlock-confirm-title" id="unlock-confirm-title">解锁新内容</div>
-        <div class="unlock-confirm-message" id="unlock-confirm-message">观看开发视频后即可解锁，是否现在跳转？</div>
-        <div class="unlock-confirm-actions">
-          <button class="unlock-confirm-button" id="unlock-confirm-cancel" type="button">暂不</button>
-          <button class="unlock-confirm-button is-primary" id="unlock-confirm-submit" type="button">前往视频解锁</button>
+    <div id="midi-overlay" aria-hidden="true" inert>
+      <div id="midi-panel" role="dialog" aria-modal="true" aria-label="MIDI 演奏">
+        <div class="settings-scroll">
+          <div class="settings-head">
+            <div class="settings-title">MIDI <em>奏</em></div>
+            <button id="midi-close" class="control-button" type="button" aria-label="关闭 MIDI">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          </div>
+          <section class="settings-section" aria-label="音频或 MIDI 文件">
+            <div class="settings-label">音频或 MIDI 文件</div>
+            <button id="midi-file-button" class="control-button" type="button" style="width:100%;padding:10px;font-size:14px;font-weight:700;">
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" style="vertical-align:middle;margin-right:6px;">
+                <path d="M12 4v12M8 12l4 4 4-4M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              选择 MP3、音频或 MIDI 文件
+            </button>
+            <input id="midi-file-input" type="file" accept=".mid,.midi,audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" hidden />
+            <div id="midi-file-info" role="status" aria-live="polite" style="display:none;margin-top:8px;font-size:12px;color:#777;"></div>
+          </section>
+          <section class="settings-section" aria-label="内置歌曲">
+            <div class="settings-label">内置歌曲</div>
+            <div id="midi-builtin" style="display:flex;flex-direction:column;gap:6px;"></div>
+          </section>
+          <section class="settings-section" aria-label="音轨选择">
+            <div class="settings-label">通道</div>
+            <div id="midi-tracks" style="display:flex;flex-direction:column;gap:6px;"></div>
+            <label style="font-size:12px;display:flex;align-items:center;gap:6px;color:#777;margin-top:6px;">
+              <input type="checkbox" id="midi-skip-drums" checked />
+              跳过打击乐通道（9/10）
+            </label>
+          </section>
+          <section class="settings-section" aria-label="播放控制">
+            <div class="settings-label">播放</div>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <button id="midi-play-btn" class="control-button" type="button" disabled style="flex:1;padding:8px;font-size:14px;font-weight:700;">▶ 播放</button>
+              <button id="midi-stop-btn" class="control-button" type="button" aria-label="重置录音或导入内容" disabled style="flex:1;padding:8px;font-size:14px;font-weight:700;">↺ 重置</button>
+            </div>
+            <div id="midi-progress" style="margin-top:8px;height:4px;background:rgba(135,131,126,.3);border-radius:2px;overflow:hidden;">
+              <div id="midi-progress-bar" style="width:0%;height:100%;background:var(--amber);border-radius:2px;transition:width .1s;"></div>
+            </div>
+            <div id="midi-time" style="margin-top:4px;font-size:11px;color:#777;text-align:center;">0:00 / 0:00</div>
+          </section>
         </div>
       </div>
     </div>
-
-    <div id="toy-notice" role="status" aria-live="assertive" aria-atomic="true" aria-hidden="true"></div>
 
     <div id="overlay">
       <div class="title">大狗<em>Tap</em></div>
@@ -1537,7 +1227,10 @@
     </div>
   </div>
 
+  <script src="lib/midi-parser.min.js"></script>
   <script src="audio-data.js?v=20260721-hajimi-new"></script>
-  <script src="main.js?v=20260722-octave-switching"></script>
+  <script src="builtin-midi.js"></script>
+  <script src="audio-melody.js?v=20260726-audio-import-v3"></script>
+  <script src="main.js?v=20260726-audio-import-v3"></script>
 </body>
 </html>
