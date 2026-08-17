@@ -168,7 +168,6 @@ const FEATURED_BVID = 'BV1kNKU6REBg';
 const FEATURED_VIDEO_URL = `https://www.bilibili.com/video/${FEATURED_BVID}/`;
 const NAVIGATION_MUTE_KEY = 'dagou-navigation-muted';
 const TOY_CLOUD_KEYS = Object.freeze({
-  sfxUnlocked: 'dagou_sfx_unlocked_v1',
   settingsSeen: 'dagou_settings_seen_v1',
   dingdongNewSeen: 'dagou_dingdong_new_seen_v1',
   hajimiNewSeen: 'dagou_hajimi_new_seen_v1',
@@ -180,14 +179,16 @@ const TOY_CLOUD_KEYS = Object.freeze({
 });
 const TOY_CLOUD_KEY_LIST = Object.freeze(Object.values(TOY_CLOUD_KEYS));
 const TOY_REQUIRED_ABILITIES = Object.freeze([
-  'getUserProfile',
+  'getAuthorVideos',
+  'getVideoUserActions',
+  'navigate',
+]);
+const TOY_CLOUD_ABILITIES = Object.freeze([
   'getCloudStorage',
   'setCloudStorage',
-  'navigate',
 ]);
 const VIDEO_UNLOCK_ITEM_IDS = new Set(['dingdong', 'hajimi']);
 const LOCKED_SFX_IDS = new Set(['dingdong']);
-const DEBUG_UNLOCK_SFX = false; // 临时调试：发布前改回 false，恢复 Toy 云端锁定。
 let controlsIdleTimer = 0;
 let navigationMuted = false;
 
@@ -430,15 +431,13 @@ function openCreatorSpace() {
   return navigateWithToy('space', CREATOR_MID, CREATOR_URL, '主页');
 }
 
-let videoUnlockPending = false;
+let videoNavigationPending = false;
+let featuredVideoAid = null;
+let coinUnlockCheckPromise = null;
 
-async function openFeaturedVideo(options) {
-  const optimisticUnlock = options?.optimisticUnlock === true;
-  const delayAfterCloudWriteMs = Number.isFinite(options?.delayAfterCloudWriteMs)
-    ? Math.max(0, options.delayAfterCloudWriteMs)
-    : 0;
-  if (videoUnlockPending) return;
-  videoUnlockPending = true;
+async function openFeaturedVideo() {
+  if (videoNavigationPending) return;
+  videoNavigationPending = true;
   videoCard.setAttribute('aria-busy', 'true');
 
   try {
@@ -449,43 +448,6 @@ async function openFeaturedVideo(options) {
       return;
     }
 
-    const wasUnlocked = state.sfxUnlocked;
-    if (optimisticUnlock && !wasUnlocked) {
-      state.sfxUnlocked = true;
-      renderToyCloudState();
-    }
-    if (optimisticUnlock && !state.cloudReadable) {
-      showToyNotice(
-        '解锁失败，请确认已登录哔哩哔哩后刷新重试。多次失败建议更新APP。',
-        true
-      );
-      return;
-    }
-
-    let unlockedNow = false;
-    if (state.cloudReadable && !wasUnlocked) {
-      try {
-        await state.toy.setCloudStorage({
-          [TOY_CLOUD_KEYS.sfxUnlocked]: '1',
-        });
-      } catch (error) {
-        markToyCloudUnavailable(state);
-        console.warn('[大狗Tap] 音效解锁状态写入失败。', error);
-        showToyNotice(
-          '解锁失败，请确认已登录哔哩哔哩后刷新重试。多次失败建议更新APP。',
-          true
-        );
-        return;
-      }
-
-      state.sfxUnlocked = true;
-      unlockedNow = true;
-      renderToyCloudState();
-      if (delayAfterCloudWriteMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, delayAfterCloudWriteMs));
-      }
-    }
-
     try {
       setNavigationMute(true);
       await state.toy.navigate({ type: 'video', id: FEATURED_BVID });
@@ -493,14 +455,12 @@ async function openFeaturedVideo(options) {
       setNavigationMute(false);
       console.warn('[大狗Tap] Toy 视频导航失败。', error);
       showToyNotice(
-        unlockedNow
-          ? '已完成解锁，但视频打开失败，请稍后重试。多次失败建议更新APP。'
-          : '视频打开失败，请稍后重试。多次失败建议更新APP。',
+        '视频打开失败，请稍后重试。多次失败建议更新APP。',
         true
       );
     }
   } finally {
-    videoUnlockPending = false;
+    videoNavigationPending = false;
     videoCard.removeAttribute('aria-busy');
   }
 }
@@ -537,7 +497,7 @@ const toyCloudState = {
   initialized: false,
   environmentAvailable: false,
   cloudReadable: false,
-  sfxUnlocked: DEBUG_UNLOCK_SFX,
+  sfxUnlocked: false,
   settingsSeen: false,
   newSeen: {
     dingdong: false,
@@ -797,20 +757,163 @@ async function detectToyEnvironment() {
     );
     if (support.some((available) => available !== true)) return null;
 
-    const profile = await toy.getUserProfile();
-    const nickname = typeof profile?.nickname === 'string'
-      ? profile.nickname.trim()
-      : '';
-    const avatar = typeof profile?.avatar === 'string'
-      ? profile.avatar.trim()
-      : '';
-    if (!nickname || !avatar) return null;
-
     return toy;
   } catch (error) {
     console.warn('[大狗Tap] Toy 站内环境检测失败。', error);
     return null;
   }
+}
+
+/* 投币解锁错误 ID：E=运行环境，A=作者视频/BV 转 aid，U=用户互动，X=未知。 */
+function createCoinUnlockError(errorId, message, cause = null, diagnostics = null) {
+  const error = new Error(message);
+  error.coinUnlockErrorId = errorId;
+  if (cause) error.cause = cause;
+  if (diagnostics) error.coinUnlockDiagnostics = diagnostics;
+  return error;
+}
+
+function getCoinUnlockErrorId(error) {
+  return typeof error?.coinUnlockErrorId === 'string'
+    ? error.coinUnlockErrorId
+    : 'COIN-X01';
+}
+
+function normalizeVideoResponseItem(item) {
+  if (!item || typeof item !== 'object') return null;
+  const payload = item.data && typeof item.data === 'object' && !Array.isArray(item.data)
+    ? item.data
+    : item;
+  return { item, payload };
+}
+
+function isSuccessfulVideoBatchResponse(response) {
+  return Boolean(
+    response &&
+    (response.status === undefined || response.status === 'ok') &&
+    Array.isArray(response.items)
+  );
+}
+
+/* 批量接口保证结果与请求顺序一致。线上部分版本的互动条目不回传 aid，
+   因此单项请求只在“未提供标识”时按第 0 项回退；显式返回了错误标识则拒绝。 */
+function findSuccessfulVideoItem(response, query = null) {
+  const aid = query?.aid ?? null;
+  const bvid = query?.bvid ?? null;
+  if (!isSuccessfulVideoBatchResponse(response)) return null;
+  const candidates = response.items
+    .filter((item) => item && (item.status === undefined || item.status === 'ok'))
+    .map(normalizeVideoResponseItem)
+    .filter(Boolean);
+  const key = aid !== null ? 'aid' : 'bvid';
+  const expected = aid !== null ? aid : bvid;
+  const exact = candidates.find(({ payload }) => payload?.[key] === expected);
+  if (exact) return exact.payload;
+  if (response.items.length !== 1 || candidates.length !== 1) return null;
+  const only = candidates[0].payload;
+  return only?.[key] === undefined || only?.[key] === null ? only : null;
+}
+
+async function resolveFeaturedVideoAid(toy) {
+  if (Number.isSafeInteger(featuredVideoAid) && featuredVideoAid > 0) {
+    return featuredVideoAid;
+  }
+
+  let response;
+  try {
+    response = await toy.getAuthorVideos({
+      videos: [{ bvid: FEATURED_BVID }],
+    });
+  } catch (error) {
+    throw createCoinUnlockError('COIN-A01', '作者视频请求失败', error);
+  }
+  if (!isSuccessfulVideoBatchResponse(response)) {
+    throw createCoinUnlockError('COIN-A02', '作者视频响应无效', null, {
+      responseStatus: response?.status ?? null,
+      itemsType: Array.isArray(response?.items) ? 'array' : typeof response?.items,
+    });
+  }
+  const item = findSuccessfulVideoItem(response, { bvid: FEATURED_BVID });
+  if (!item) {
+    throw createCoinUnlockError('COIN-A03', '目标开发视频不可用', null, {
+      itemStatuses: response.items.map((entry) => entry?.status ?? null),
+      itemKeys: response.items.map((entry) => Object.keys(entry ?? {})),
+    });
+  }
+  if (!Number.isSafeInteger(item?.aid) || item.aid <= 0) {
+    throw createCoinUnlockError('COIN-A04', '目标开发视频的 aid 无效', null, {
+      aid: item?.aid ?? null,
+      aidType: typeof item?.aid,
+      itemKeys: Object.keys(item ?? {}),
+    });
+  }
+  featuredVideoAid = item.aid;
+  return featuredVideoAid;
+}
+
+function refreshCoinUnlock(state = toyCloudState) {
+  if (coinUnlockCheckPromise) return coinUnlockCheckPromise;
+
+  coinUnlockCheckPromise = (async () => {
+    if (!state.environmentAvailable || !state.toy) {
+      return { checked: false, unlocked: false };
+    }
+
+    try {
+      const aid = await resolveFeaturedVideoAid(state.toy);
+      let response;
+      try {
+        response = await state.toy.getVideoUserActions({ aids: [aid] });
+      } catch (error) {
+        throw createCoinUnlockError('COIN-U01', '用户互动状态请求失败', error);
+      }
+      if (!isSuccessfulVideoBatchResponse(response)) {
+        throw createCoinUnlockError('COIN-U02', '用户互动状态响应无效', null, {
+          responseStatus: response?.status ?? null,
+          itemsType: Array.isArray(response?.items) ? 'array' : typeof response?.items,
+        });
+      }
+      const item = findSuccessfulVideoItem(response, { aid });
+      if (!item) {
+        throw createCoinUnlockError('COIN-U03', '目标视频互动条目不可用', null, {
+          requestedAid: aid,
+          itemStatuses: response.items.map((entry) => entry?.status ?? null),
+          itemKeys: response.items.map((entry) => Object.keys(entry ?? {})),
+        });
+      }
+      if (!Number.isInteger(item.coinCount) || item.coinCount < 0) {
+        throw createCoinUnlockError('COIN-U04', '目标视频投币数量无效', null, {
+          coinCount: item.coinCount ?? null,
+          coinCountType: typeof item.coinCount,
+          itemKeys: Object.keys(item),
+        });
+      }
+
+      state.sfxUnlocked = item.coinCount >= 1;
+      renderToyCloudState();
+      return { checked: true, unlocked: state.sfxUnlocked };
+    } catch (error) {
+      const errorId = getCoinUnlockErrorId(error);
+      console.warn(`[大狗Tap][${errorId}] 开发视频投币状态读取失败。`, error);
+      state.sfxUnlocked = false;
+      renderToyCloudState();
+      return { checked: false, unlocked: false, errorId };
+    }
+  })().finally(() => {
+    coinUnlockCheckPromise = null;
+  });
+
+  return coinUnlockCheckPromise;
+}
+
+async function detectToyCloudSupport(toy) {
+  if (TOY_CLOUD_ABILITIES.some((ability) => typeof toy[ability] !== 'function')) {
+    return false;
+  }
+  const support = await Promise.all(
+    TOY_CLOUD_ABILITIES.map((ability) => toy.isSupport(ability))
+  );
+  return support.every((available) => available === true);
 }
 
 async function initializeToyCloudState() {
@@ -824,15 +927,17 @@ async function initializeToyCloudState() {
 
   toyCloudState.toy = toy;
   toyCloudState.environmentAvailable = true;
+  const coinUnlockReady = refreshCoinUnlock(toyCloudState);
 
   try {
+    if (!(await detectToyCloudSupport(toy))) {
+      throw new Error('Toy 云存储能力不可用');
+    }
     const cloud = await toy.getCloudStorage(TOY_CLOUD_KEY_LIST);
     if (!cloud || typeof cloud !== 'object') {
       throw new Error('Toy 云存储返回值无效');
     }
     toyCloudState.cloudReadable = true;
-    toyCloudState.sfxUnlocked =
-      DEBUG_UNLOCK_SFX || cloud[TOY_CLOUD_KEYS.sfxUnlocked] === '1';
     replacePerformanceSettings(readCloudPerformanceSettings(cloud));
 
     if (!toyCloudState.locallyChanged.settingsSeen) {
@@ -854,6 +959,7 @@ async function initializeToyCloudState() {
     console.warn('[大狗Tap] Toy 云状态读取失败。', error);
   }
 
+  await coinUnlockReady;
   toyCloudState.initialized = true;
   renderToyCloudState();
   return toyCloudState;
@@ -912,15 +1018,11 @@ function markAllSfxNewSeen() {
   persistSeenState(items);
 }
 
-async function requireToyCloudContext() {
+async function requireToyUnlockContext() {
   const state = await toyStateReady;
   if (!state.environmentAvailable || !state.toy) {
-    showToyNotice('请在B站打开此页面或者更新哔哩哔哩手机APP后再解锁', true);
-    return null;
-  }
-  if (!state.cloudReadable) {
     showToyNotice(
-      '云端状态读取失败，请确认已登录哔哩哔哩后刷新重试。多次失败建议更新APP。',
+      '无法检查投币状态（错误ID：COIN-E01）。请在B站打开此页面或更新哔哩哔哩APP后重试。',
       true
     );
     return null;
@@ -928,8 +1030,28 @@ async function requireToyCloudContext() {
   return state;
 }
 
+async function verifyCoinUnlockForTrigger(trigger) {
+  const state = await requireToyUnlockContext();
+  if (!state) return null;
+
+  trigger?.setAttribute('aria-busy', 'true');
+  try {
+    const result = await refreshCoinUnlock(state);
+    if (!result.checked) {
+      showToyNotice(
+        `投币状态读取失败（错误ID：${result.errorId ?? 'COIN-X01'}）。请确认已登录哔哩哔哩后重试，多次失败建议更新APP。`,
+        true
+      );
+      return null;
+    }
+    return state;
+  } finally {
+    trigger?.removeAttribute('aria-busy');
+  }
+}
+
 function openUnlockConfirm(unlockItem, trigger) {
-  if (unlockConfirmOpen || videoUnlockPending) return;
+  if (unlockConfirmOpen || videoNavigationPending) return;
   const itemLabel = unlockItem === 'emperor'
     ? '哈基米（帝皇）'
     : '叮咚鸡';
@@ -937,7 +1059,7 @@ function openUnlockConfirm(unlockItem, trigger) {
   unlockConfirmTrigger = trigger ?? null;
   unlockConfirmTitle.textContent = `解锁${itemLabel}`;
   unlockConfirmMessage.textContent =
-    `${itemLabel}尚未解锁。观看开发视频即可同时解锁叮咚鸡和哈基米（帝皇），是否现在跳转？`;
+    `${itemLabel}尚未解锁。给开发视频投币即可同时解锁叮咚鸡和哈基米（帝皇），是否现在前往投币？`;
   settingsOverlay.inert = true;
   unlockConfirmOverlay.inert = false;
   unlockConfirmOverlay.classList.add('is-open');
@@ -946,7 +1068,7 @@ function openUnlockConfirm(unlockItem, trigger) {
 }
 
 function closeUnlockConfirm(restoreFocus = true) {
-  if (!unlockConfirmOpen || videoUnlockPending) return;
+  if (!unlockConfirmOpen || videoNavigationPending) return;
   const trigger = unlockConfirmTrigger;
   unlockConfirmOpen = false;
   unlockConfirmTrigger = null;
@@ -962,19 +1084,16 @@ function closeUnlockConfirm(restoreFocus = true) {
 function setUnlockConfirmPending(pending) {
   unlockConfirmCancel.disabled = pending;
   unlockConfirmSubmit.disabled = pending;
-  unlockConfirmSubmit.textContent = pending ? '跳转中…' : '前往视频解锁';
+  unlockConfirmSubmit.textContent = pending ? '打开中…' : '前往视频投币';
   if (pending) unlockConfirmSubmit.setAttribute('aria-busy', 'true');
   else unlockConfirmSubmit.removeAttribute('aria-busy');
 }
 
 async function confirmUnlockFromVideo() {
-  if (!unlockConfirmOpen || videoUnlockPending) return;
+  if (!unlockConfirmOpen || videoNavigationPending) return;
   setUnlockConfirmPending(true);
   try {
-    await openFeaturedVideo({
-      optimisticUnlock: true,
-      delayAfterCloudWriteMs: 500,
-    });
+    await openFeaturedVideo();
   } finally {
     setUnlockConfirmPending(false);
     closeUnlockConfirm();
@@ -1002,10 +1121,10 @@ function renderHajimiCharacterControl() {
   hajimiSkinEmperor.setAttribute('aria-checked', String(hajimiAnimationEnabled));
   hajimiSkinEmperor.classList.toggle('is-locked', emperorLocked);
   hajimiSkinEmperor.classList.toggle('is-new-hidden', toyCloudState.newSeen.hajimi);
-  hajimiSkinEmperorHint.textContent = emperorLocked ? '观看开发视频后解锁' : '已解锁';
+  hajimiSkinEmperorHint.textContent = emperorLocked ? '投币开发视频解锁' : '已解锁';
   hajimiSkinEmperor.setAttribute(
     'aria-label',
-    emperorLocked ? '哈基米帝皇形象，观看开发视频后解锁' : '哈基米帝皇形象'
+    emperorLocked ? '哈基米帝皇形象，投币开发视频解锁' : '哈基米帝皇形象'
   );
 
   hajimiOptionImage.src = isSelected && hajimiAnimationEnabled
@@ -1134,7 +1253,7 @@ async function handleSfxOptionClick(option) {
     return;
   }
 
-  const state = await requireToyCloudContext();
+  const state = await verifyCoinUnlockForTrigger(option);
   if (!state) return;
   if (!state.sfxUnlocked) {
     openUnlockConfirm('dingdong', option);
@@ -1145,7 +1264,7 @@ async function handleSfxOptionClick(option) {
 }
 
 /* 形象切换行只在选中哈基米时可见可点：原皮随意换回；
-   帝皇未解锁时点击只引导去看开发视频，绝不影响哈基米音效本身。 */
+   帝皇未解锁时点击会复查投币并引导前往开发视频，绝不影响哈基米音效本身。 */
 async function handleSkinOptionClick(button) {
   if (selectedSfxId !== 'hajimi') return;
   if (button.dataset.skin !== 'emperor') {
@@ -1159,7 +1278,7 @@ async function handleSkinOptionClick(button) {
     return;
   }
 
-  const state = await requireToyCloudContext();
+  const state = await verifyCoinUnlockForTrigger(button);
   if (!state) return;
   if (!state.sfxUnlocked) {
     openUnlockConfirm('emperor', button);

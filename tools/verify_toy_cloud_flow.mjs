@@ -82,12 +82,21 @@ const functionNames = [
   'renderPerformanceSettings',
   'renderToyCloudState',
   'detectToyEnvironment',
+  'createCoinUnlockError',
+  'getCoinUnlockErrorId',
+  'normalizeVideoResponseItem',
+  'isSuccessfulVideoBatchResponse',
+  'findSuccessfulVideoItem',
+  'resolveFeaturedVideoAid',
+  'refreshCoinUnlock',
+  'detectToyCloudSupport',
   'initializeToyCloudState',
   'persistSeenState',
   'markSettingsSeen',
   'markSfxNewSeen',
   'markAllSfxNewSeen',
-  'requireToyCloudContext',
+  'requireToyUnlockContext',
+  'verifyCoinUnlockForTrigger',
   'openUnlockConfirm',
   'closeUnlockConfirm',
   'setUnlockConfirmPending',
@@ -115,22 +124,27 @@ const extractedFunctions = functionNames.map(extractFunction).join('\n');
 function makeToy({
   cloud = {},
   support = true,
-  profile = { nickname: '测试用户', avatar: 'https://example.com/avatar.png' },
+  aid = 123456789,
+  coinCount = 0,
+  authorVideosResponse = null,
+  videoActionsResponse = null,
+  authorVideosError = null,
+  videoActionsError = null,
   getError = null,
   setError = null,
   setHandler = null,
   navigateError = null,
+  navigateHandler = null,
 } = {}) {
   const log = [];
   const storage = { ...cloud };
+  let currentCoinCount = coinCount;
   const toy = {
     async isSupport(ability) {
       log.push(`support:${ability}`);
+      if (typeof support === 'function') return support(ability);
+      if (support && typeof support === 'object') return support[ability] !== false;
       return support;
-    },
-    async getUserProfile() {
-      log.push('profile');
-      return profile;
     },
     async getCloudStorage(keys) {
       log.push(`get:${keys.join(',')}`);
@@ -149,9 +163,33 @@ function makeToy({
     async navigate(request) {
       log.push(`navigate:${request.type}:${request.id}`);
       if (navigateError) throw navigateError;
+      if (navigateHandler) await navigateHandler(request);
+    },
+    async getAuthorVideos(request) {
+      log.push(`authorVideos:${request.videos[0].bvid}`);
+      if (authorVideosError) throw authorVideosError;
+      return authorVideosResponse ?? {
+        status: 'ok',
+        items: [{ status: 'ok', aid, bvid: request.videos[0].bvid }],
+      };
+    },
+    async getVideoUserActions(request) {
+      log.push(`videoActions:${request.aids[0]}`);
+      if (videoActionsError) throw videoActionsError;
+      return videoActionsResponse ?? {
+        status: 'ok',
+        items: [{ status: 'ok', aid: request.aids[0], coinCount: currentCoinCount }],
+      };
     },
   };
-  return { toy, log, storage };
+  return {
+    toy,
+    log,
+    storage,
+    setCoinCount(value) {
+      currentCoinCount = value;
+    },
+  };
 }
 
 function makeHarness(toy) {
@@ -175,7 +213,7 @@ function makeHarness(toy) {
     dataset: { skin: 'emperor' },
   });
   const hajimiSkinEmperorHint = new FakeElement();
-  hajimiSkinEmperorHint.textContent = '观看开发视频后解锁';
+  hajimiSkinEmperorHint.textContent = '投币开发视频解锁';
   const dogCloseImage = new FakeElement();
   dogCloseImage.src = 'Image/maodie_close_mouth.png';
   dogCloseImage.alt = '哈基米';
@@ -223,7 +261,6 @@ function makeHarness(toy) {
     },
     clearTimeout() {},
     TOY_CLOUD_KEYS: {
-      sfxUnlocked: 'dagou_sfx_unlocked_v1',
       settingsSeen: 'dagou_settings_seen_v1',
       dingdongNewSeen: 'dagou_dingdong_new_seen_v1',
       hajimiNewSeen: 'dagou_hajimi_new_seen_v1',
@@ -234,7 +271,6 @@ function makeHarness(toy) {
       showGrid: 'dagou_show_grid_v1',
     },
     TOY_CLOUD_KEY_LIST: [
-      'dagou_sfx_unlocked_v1',
       'dagou_settings_seen_v1',
       'dagou_dingdong_new_seen_v1',
       'dagou_hajimi_new_seen_v1',
@@ -245,11 +281,11 @@ function makeHarness(toy) {
       'dagou_show_grid_v1',
     ],
     TOY_REQUIRED_ABILITIES: [
-      'getUserProfile',
-      'getCloudStorage',
-      'setCloudStorage',
+      'getAuthorVideos',
+      'getVideoUserActions',
       'navigate',
     ],
+    TOY_CLOUD_ABILITIES: ['getCloudStorage', 'setCloudStorage'],
     VIDEO_UNLOCK_ITEM_IDS: new Set(['dingdong', 'hajimi']),
     LOCKED_SFX_IDS: new Set(['dingdong']),
     SFX_SAMPLE_SETS: Object.freeze({
@@ -297,9 +333,6 @@ function makeHarness(toy) {
     started: false,
     ctx: null,
     startTime: 0,
-    // Keep the baseline cases validating the normal release/cloud-lock flow.
-    // The dedicated debug case below opts into the temporary bypass explicitly.
-    DEBUG_UNLOCK_SFX: false,
     PIANO_OCTAVE_MIN: 3,
     PIANO_OCTAVE_MAX: 6,
     PIANO_DEFAULT_OCTAVE_START: 4,
@@ -366,7 +399,9 @@ function makeHarness(toy) {
     unlockConfirmOpen: false,
     unlockConfirmTrigger: null,
     openCreatorSpace() {},
-    videoUnlockPending: false,
+    videoNavigationPending: false,
+    featuredVideoAid: null,
+    coinUnlockCheckPromise: null,
     toyNoticeTimer: 0,
     toyCloudState: {
       toy: null,
@@ -434,7 +469,6 @@ function performanceButton(harness, settingName) {
 }
 
 for (const key of [
-  'dagou_sfx_unlocked_v1',
   'dagou_settings_seen_v1',
   'dagou_dingdong_new_seen_v1',
   'dagou_hajimi_new_seen_v1',
@@ -444,10 +478,10 @@ for (const key of [
 ]) {
   assert.ok(mainSource.includes(`'${key}'`), `Missing cloud key ${key}`);
 }
-assert.match(
+assert.doesNotMatch(
   mainSource,
-  /const DEBUG_UNLOCK_SFX = (?:true|false);/,
-  'temporary SFX unlock bypass must remain an explicit boolean'
+  /dagou_sfx_unlocked_v1|DEBUG_UNLOCK_SFX|getUserProfile/,
+  'unlock state and profile consent must not participate in the new flow'
 );
 assert.match(
   htmlSource,
@@ -558,7 +592,7 @@ const emperorSkinBlock = htmlSource.match(
 assert.ok(emperorSkinBlock, 'Missing emperor skin block');
 assert.match(
   emperorSkinBlock[0],
-  /sfx-lock[\s\S]*?skin-hint">观看开发视频后解锁/,
+  /sfx-lock[\s\S]*?skin-hint">投币开发视频解锁/,
   'the lock and the unlock hint must both live on the emperor skin option'
 );
 assert.match(
@@ -654,7 +688,7 @@ for (const [settingName, defaultChecked] of [
     true,
     'the emperor skin chip starts locked instead of the Hajimi card'
   );
-  assert.equal(harness.hajimiSkinEmperorHint.textContent, '观看开发视频后解锁');
+  assert.equal(harness.hajimiSkinEmperorHint.textContent, '投币开发视频解锁');
   assert.equal(harness.hajimiSkinSwitcher.classList.contains('is-open'), true);
   assert.equal(option(harness, 'hajimi').classList.contains('is-active'), true);
   assert.equal(option(harness, 'dagou').classList.contains('is-locked'), false);
@@ -688,15 +722,19 @@ for (const [settingName, defaultChecked] of [
   });
   const harness = makeHarness(setup.toy);
   await initialize(harness);
-  assert.equal(harness.context.toyCloudState.sfxUnlocked, true);
+  assert.equal(
+    harness.context.toyCloudState.sfxUnlocked,
+    false,
+    'the legacy cloud unlock value must be ignored',
+  );
   assert.equal(harness.context.updateDot.classList.contains('is-hidden'), true);
   assert.equal(harness.context.topControls.classList.contains('has-update-dot'), false);
-  assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), false);
+  assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), true);
   assert.equal(
     harness.hajimiSkinEmperor.classList.contains('is-locked'),
-    false
+    true
   );
-  assert.equal(harness.hajimiSkinEmperorHint.textContent, '已解锁');
+  assert.equal(harness.hajimiSkinEmperorHint.textContent, '投币开发视频解锁');
   assert.equal(
     harness.hajimiSkinEmperor.classList.contains('is-new-hidden'),
     true
@@ -741,10 +779,10 @@ for (const [settingName, defaultChecked] of [
   await initialize(harness);
   assert.equal(harness.context.updateDot.classList.contains('is-hidden'), false);
   assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), true);
-  assert.equal(await harness.context.requireToyCloudContext(), null);
+  assert.equal(await harness.context.requireToyUnlockContext(), null);
   assert.equal(
     harness.notices.at(-1).message,
-    '请在B站打开此页面或者更新哔哩哔哩手机APP后再解锁'
+    '无法检查投币状态（错误ID：COIN-E01）。请在B站打开此页面或更新哔哩哔哩APP后重试。'
   );
   await harness.context.openFeaturedVideo();
   assert.deepEqual(harness.externalNavigationLog, [
@@ -770,14 +808,16 @@ for (const [settingName, defaultChecked] of [
 }
 
 {
-  const setup = makeToy({ profile: { nickname: '', avatar: '' } });
+  const setup = makeToy({
+    support: { getVideoUserActions: false },
+  });
   const harness = makeHarness(setup.toy);
   await initialize(harness);
   await harness.context.handleSfxOptionClick(option(harness, 'dingdong'));
   assert.equal(harness.context.unlockConfirmOpen, false);
   assert.equal(
     harness.notices.at(-1).message,
-    '请在B站打开此页面或者更新哔哩哔哩手机APP后再解锁'
+    '无法检查投币状态（错误ID：COIN-E01）。请在B站打开此页面或更新哔哩哔哩APP后重试。'
   );
 }
 
@@ -809,15 +849,17 @@ for (const [settingName, defaultChecked] of [
   assert.equal(harness.context.hajimiAnimationEnabled, false);
   assert.equal(
     harness.notices.at(-1).message,
-    '请在B站打开此页面或者更新哔哩哔哩手机APP后再解锁'
+    '无法检查投币状态（错误ID：COIN-E01）。请在B站打开此页面或更新哔哩哔哩APP后重试。'
   );
 }
 
 {
-  const harness = makeHarness(null);
+  const setup = makeToy({ coinCount: 1 });
+  const harness = makeHarness(setup.toy);
   await initialize(harness);
-  harness.context.toyCloudState.sfxUnlocked = true;
-  harness.context.renderToyCloudState();
+  assert.equal(harness.context.toyCloudState.sfxUnlocked, true);
+  assert.ok(setup.log.includes('authorVideos:BV1kNKU6REBg'));
+  assert.ok(setup.log.includes('videoActions:123456789'));
   assert.equal(option(harness, 'hajimi').classList.contains('is-locked'), false);
   assert.equal(
     harness.hajimiSkinEmperor.classList.contains('is-locked'),
@@ -917,7 +959,7 @@ for (const [settingName, defaultChecked] of [
 }
 
 {
-  const setup = makeToy({ getError: new Error('read failed') });
+  const setup = makeToy({ getError: new Error('read failed'), coinCount: 1 });
   const harness = makeHarness(setup.toy);
   await initialize(harness);
   assert.equal(harness.context.toyCloudState.cloudReadable, false);
@@ -925,14 +967,18 @@ for (const [settingName, defaultChecked] of [
   assert.equal(option(harness, 'hajimi').classList.contains('is-locked'), false);
   assert.equal(
     harness.hajimiSkinEmperor.classList.contains('is-locked'),
-    true
+    false
   );
-  assert.equal(await harness.context.requireToyCloudContext(), null);
-  assert.match(harness.notices.at(-1).message, /云端状态读取失败/);
+  assert.equal(
+    harness.context.toyCloudState.sfxUnlocked,
+    true,
+    'cloud read failures must not block a successful coin verification',
+  );
+  assert.equal(await harness.context.requireToyUnlockContext(), harness.context.toyCloudState);
   setup.log.length = 0;
   await harness.context.openFeaturedVideo();
   assert.deepEqual(setup.log, ['navigate:video:BV1kNKU6REBg']);
-  assert.equal(harness.context.toyCloudState.sfxUnlocked, false);
+  assert.equal(harness.context.toyCloudState.sfxUnlocked, true);
   assert.deepEqual(
     { ...harness.context.performanceSettings },
     {
@@ -1046,7 +1092,7 @@ for (const [settingName, defaultChecked] of [
   assert.equal(harness.unlockConfirmOverlay.inert, false);
   assert.equal(harness.context.settingsOverlay.inert, true);
   assert.equal(harness.unlockConfirmTitle.textContent, '解锁叮咚鸡');
-  assert.match(harness.unlockConfirmMessage.textContent, /是否现在跳转/);
+  assert.match(harness.unlockConfirmMessage.textContent, /是否现在前往投币/);
   assert.equal(harness.notices.length, 0);
   harness.context.closeUnlockConfirm();
   assert.equal(harness.context.unlockConfirmOpen, false);
@@ -1073,7 +1119,9 @@ for (const [settingName, defaultChecked] of [
 }
 
 {
-  const setup = makeToy();
+  let releaseNavigation;
+  const navigationGate = new Promise((resolve) => { releaseNavigation = resolve; });
+  const setup = makeToy({ navigateHandler: async () => navigationGate });
   const harness = makeHarness(setup.toy);
   await initialize(harness);
   harness.context.settingsOpen = true;
@@ -1083,82 +1131,128 @@ for (const [settingName, defaultChecked] of [
   setup.log.length = 0;
   assert.equal(harness.context.unlockConfirmOpen, true);
 
-  let releaseNavigationDelay = null;
-  harness.context.setTimeout = (callback, delay) => {
-    assert.equal(delay, 500, 'confirmed unlock navigation must wait 0.5 seconds');
-    releaseNavigationDelay = callback;
-    return 1;
-  };
   const confirmation = harness.context.confirmUnlockFromVideo();
-  for (let i = 0; i < 5 && !releaseNavigationDelay; i++) {
+  for (let i = 0; i < 5 && setup.log.length === 0; i++) {
     await Promise.resolve();
   }
 
-  assert.equal(harness.context.toyCloudState.sfxUnlocked, true);
-  assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), false);
-  assert.equal(harness.hajimiSkinEmperor.classList.contains('is-locked'), false);
-  assert.equal(harness.unlockConfirmSubmit.textContent, '跳转中…');
+  assert.equal(harness.context.toyCloudState.sfxUnlocked, false);
+  assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), true);
+  assert.equal(harness.hajimiSkinEmperor.classList.contains('is-locked'), true);
+  assert.equal(harness.unlockConfirmSubmit.textContent, '打开中…');
   assert.equal(harness.unlockConfirmSubmit.disabled, true);
-  assert.deepEqual(setup.log, ['set:dagou_sfx_unlocked_v1']);
-  assert.equal(typeof releaseNavigationDelay, 'function');
+  assert.deepEqual(setup.log, ['navigate:video:BV1kNKU6REBg']);
 
-  releaseNavigationDelay();
+  releaseNavigation();
   await confirmation;
 
-  assert.deepEqual(setup.log, [
-    'set:dagou_sfx_unlocked_v1',
-    'navigate:video:BV1kNKU6REBg',
-  ]);
-  assert.equal(harness.unlockConfirmSubmit.textContent, '前往视频解锁');
+  assert.equal(harness.context.toyCloudState.sfxUnlocked, false);
+  assert.equal(harness.unlockConfirmSubmit.textContent, '前往视频投币');
   assert.equal(harness.unlockConfirmSubmit.disabled, false);
   assert.equal(harness.context.unlockConfirmOpen, false);
-}
-
-{
-  const setup = makeToy({ setError: new Error('write failed') });
-  const harness = makeHarness(setup.toy);
-  await initialize(harness);
-  await harness.context.handleSfxOptionClick(option(harness, 'dingdong'));
-  await harness.context.confirmUnlockFromVideo();
-
-  assert.equal(setup.log.includes('navigate:video:BV1kNKU6REBg'), false);
-  assert.equal(
-    harness.context.toyCloudState.sfxUnlocked,
-    true,
-    'a confirmed unlock must remain available for the current page after a cloud write failure'
-  );
-  assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), false);
-  assert.equal(harness.hajimiSkinEmperor.classList.contains('is-locked'), false);
-  assert.match(harness.notices.at(-1).message, /解锁失败/);
 }
 
 {
   const setup = makeToy();
   const harness = makeHarness(setup.toy);
   await initialize(harness);
+  setup.setCoinCount(1);
   setup.log.length = 0;
-  await harness.context.openFeaturedVideo();
+  await harness.context.handleSfxOptionClick(option(harness, 'dingdong'));
   assert.deepEqual(setup.log, [
-    'set:dagou_sfx_unlocked_v1',
-    'navigate:video:BV1kNKU6REBg',
+    'set:dagou_dingdong_new_seen_v1',
+    'videoActions:123456789',
   ]);
   assert.equal(harness.context.toyCloudState.sfxUnlocked, true);
   assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), false);
+  assert.equal(harness.hajimiSkinEmperor.classList.contains('is-locked'), false);
+  assert.equal(option(harness, 'dingdong').classList.contains('is-active'), true);
+  assert.equal(harness.context.unlockConfirmOpen, false);
+}
+
+{
+  const setup = makeToy({ coinCount: 2 });
+  const harness = makeHarness(setup.toy);
+  await initialize(harness);
+  assert.equal(harness.context.toyCloudState.sfxUnlocked, true);
+  assert.equal(option(harness, 'dingdong').classList.contains('is-locked'), false);
+  assert.equal(harness.hajimiSkinEmperor.classList.contains('is-locked'), false);
+}
+
+{
+  const setup = makeToy({
+    authorVideosResponse: {
+      status: 'ok',
+      items: [{ status: 'ok', aid: 0, bvid: 'BV1kNKU6REBg' }],
+    },
+  });
+  const harness = makeHarness(setup.toy);
+  await initialize(harness);
+  assert.equal(harness.context.toyCloudState.sfxUnlocked, false);
+  await harness.context.handleSfxOptionClick(option(harness, 'dingdong'));
+  assert.equal(harness.context.unlockConfirmOpen, false);
+  assert.match(harness.notices.at(-1).message, /错误ID：COIN-A04/);
+}
+
+{
+  const setup = makeToy({
+    videoActionsResponse: {
+      status: 'ok',
+      items: [{ status: 'ok', aid: 987654321, coinCount: 2 }],
+    },
+  });
+  const harness = makeHarness(setup.toy);
+  await initialize(harness);
   assert.equal(
-    harness.hajimiSkinEmperor.classList.contains('is-locked'),
-    false
+    harness.context.toyCloudState.sfxUnlocked,
+    false,
+    'an action item for another aid must never unlock the featured video rewards',
+  );
+  await harness.context.handleSfxOptionClick(option(harness, 'dingdong'));
+  assert.match(harness.notices.at(-1).message, /错误ID：COIN-U03/);
+}
+
+{
+  const setup = makeToy({
+    videoActionsResponse: {
+      items: [{ liked: false, coinCount: 1, favorited: false }],
+    },
+  });
+  const harness = makeHarness(setup.toy);
+  await initialize(harness);
+  assert.equal(
+    harness.context.toyCloudState.sfxUnlocked,
+    true,
+    'a single ordered action item may omit aid as documented by the SDK example',
   );
 }
 
 {
-  const setup = makeToy({ setError: new Error('write failed') });
+  const setup = makeToy({
+    coinCount: 1,
+    authorVideosResponse: {
+      items: [{
+        data: { aid: 123456789, bvid: 'BV1kNKU6REBg' },
+      }],
+    },
+  });
   const harness = makeHarness(setup.toy);
   await initialize(harness);
-  setup.log.length = 0;
-  await harness.context.openFeaturedVideo();
-  assert.equal(setup.log.includes('navigate:video:BV1kNKU6REBg'), false);
+  assert.equal(
+    harness.context.toyCloudState.sfxUnlocked,
+    true,
+    'nested author-video payloads must still resolve the target aid',
+  );
+}
+
+{
+  const setup = makeToy({ videoActionsError: new Error('not logged in') });
+  const harness = makeHarness(setup.toy);
+  await initialize(harness);
+  await harness.context.handleSfxOptionClick(option(harness, 'dingdong'));
   assert.equal(harness.context.toyCloudState.sfxUnlocked, false);
-  assert.match(harness.notices.at(-1).message, /解锁失败/);
+  assert.equal(harness.context.unlockConfirmOpen, false);
+  assert.match(harness.notices.at(-1).message, /错误ID：COIN-U01/);
 }
 
 {
@@ -1167,8 +1261,8 @@ for (const [settingName, defaultChecked] of [
   await initialize(harness);
   setup.log.length = 0;
   await harness.context.openFeaturedVideo();
-  assert.equal(harness.context.toyCloudState.sfxUnlocked, true);
-  assert.match(harness.notices.at(-1).message, /已完成解锁，但视频打开失败/);
+  assert.equal(harness.context.toyCloudState.sfxUnlocked, false);
+  assert.match(harness.notices.at(-1).message, /视频打开失败/);
   assert.equal(harness.muteLog.at(-1), false);
 }
 
@@ -1219,13 +1313,18 @@ assert.match(
 );
 assert.match(
   htmlSource,
-  /id="unlock-confirm-submit"[^>]*>前往视频解锁<\/button>/,
-  'the unlock confirmation must provide an explicit video action'
+  /id="unlock-confirm-submit"[^>]*>前往视频投币<\/button>/,
+  'the unlock confirmation must provide an explicit coin action'
 );
-assert.match(
+assert.doesNotMatch(
   mainSource,
-  /delayAfterCloudWriteMs:\s*500/,
-  'confirmed unlocks must wait 0.5 seconds after the cloud write'
+  /delayAfterCloudWriteMs|optimisticUnlock|dagou_sfx_unlocked_v1/,
+  'video navigation must not optimistically or persistently unlock content'
+);
+assert.doesNotMatch(
+  `${htmlSource}\n${mainSource}`,
+  /观看开发视频(?:后)?解锁|前往视频解锁|跳转中…/,
+  'all watch-to-unlock copy must be replaced by coin-to-unlock copy',
 );
 
 {
@@ -1253,21 +1352,20 @@ assert.doesNotMatch(
   'stage performance clicks must not clear the settings dot'
 );
 
-console.log('Toy cloud unlock flow verified:');
+console.log('Toy coin unlock and cloud settings flow verified:');
 console.log('- Hajimi original is the default and freely switches with Dagou');
 console.log('- the Hajimi sound card never shows a lock; the lock lives on the emperor skin chip');
 console.log('- only Dingdong and the dedicated emperor skin chip start locked');
 console.log('- the settings hint arrow appears and disappears together with the red dot');
-console.log('- unavailable cloud reads keep the red dot and premium items locked');
-console.log('- signed-in Toy users get a centered unlock confirmation');
-console.log('- confirmed unlocks update locally, persist to cloud, then wait 0.5s before navigation');
-console.log('- failed confirmed writes keep the current page temporarily unlocked without navigating');
-console.log('- cloud unlock is written before Toy video navigation');
-console.log('- videos still open outside Toy or without readable cloud state, without unlocking');
-console.log('- failed writes never navigate; failed navigation keeps the unlock');
+console.log('- author-video lookup converts the fixed BV id to an aid before action lookup');
+console.log('- one or more coins unlock Dingdong and the emperor skin together');
+console.log('- locked-item clicks recheck coins and guide unpaid users to the video');
+console.log('- confirmed video navigation never changes or persists the unlock state');
+console.log('- cloud read failures do not block successful coin verification');
+console.log('- videos still open outside Toy without unlocking');
+console.log('- failed coin reads remain locked; failed navigation keeps the current state');
 console.log('- settings red dot and per-option NEW states persist independently');
 console.log('- a visible red dot pins only the settings button while audio controls hide');
-console.log('- the temporary debug switch unlocks both premium items without Toy capabilities');
 console.log('- performance defaults, cloud restore/write, and local-only fallback switching');
 console.log('- the emperor skin chip lazily loads and toggles the looping character');
 console.log('- Web Audio clock returns the lossless atlas to frame 0 every nine beats');
